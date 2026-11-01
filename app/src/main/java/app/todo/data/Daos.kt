@@ -10,7 +10,7 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface TaskDao {
-    @Query("SELECT * FROM tasks WHERE doneAt IS NULL ORDER BY bucket, createdAt")
+    @Query("SELECT * FROM tasks WHERE doneAt IS NULL ORDER BY createdAt")
     fun openTasks(): Flow<List<Task>>
 
     @Insert
@@ -64,4 +64,16 @@ interface NudgeDao {
 
     @Query("SELECT * FROM nudges WHERE taskId = :taskId ORDER BY at DESC")
     suspend fun forTask(taskId: String): List<NudgeEvent>
+}
+
+@Dao
+interface FreeWindowDao {
+    @Query("SELECT * FROM free_windows ORDER BY startMinute")
+    fun all(): Flow<List<FreeWindow>>
+
+    @Insert
+    suspend fun insert(window: FreeWindow)
+
+    @Delete
+    suspend fun delete(window: FreeWindow)
 }

@@ -13,12 +13,13 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -48,7 +49,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -56,9 +56,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
-import app.todo.data.Bucket
 import app.todo.data.Goal
+import app.todo.data.Repeat
+import app.todo.data.Size
 import app.todo.data.Task
+import app.todo.data.Timing
 import app.todo.data.TodoDatabase
 import app.todo.data.Where
 
@@ -105,7 +107,7 @@ fun TodoRoot(db: TodoDatabase) {
             val tasks by vm.openTasks.collectAsStateWithLifecycle()
             Column(Modifier.padding(padding).padding(16.dp).fillMaxSize()) {
                 when {
-                    showSettings -> Text("Home Wi-Fi, quiet hours, nudge threshold and permissions go here.")
+                    showSettings -> SettingsScreen(vm)
                     tab == Tab.NOW -> NowScreen(vm, tasks)
                     tab == Tab.TASKS -> TasksScreen(vm, tasks)
                     tab == Tab.GOALS -> GoalsScreen(vm)
@@ -117,8 +119,9 @@ fun TodoRoot(db: TodoDatabase) {
 
 @Composable
 private fun NowScreen(vm: TodoViewModel, tasks: List<Task>) {
-    // Skipped tasks reset when the app restarts; ranking will use snooze history instead.
+    // "No reminder" skips a task until the app restarts; timed reminders are stored on the task.
     var skipped by remember { mutableStateOf(setOf<String>()) }
+    var askingWhen by remember { mutableStateOf(false) }
     val pick = vm.suggestion(tasks, skipped)
 
     if (pick == null) {
@@ -127,20 +130,57 @@ private fun NowScreen(vm: TodoViewModel, tasks: List<Task>) {
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(20.dp)) {
                 Text(pick.title, style = MaterialTheme.typography.headlineSmall)
-                pick.minutes?.let { Text("$it min", style = MaterialTheme.typography.bodyMedium) }
+                Text(pick.meta(), style = MaterialTheme.typography.bodyMedium)
                 Spacer(Modifier.height(16.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Button(onClick = { vm.done(pick) }) { Text("Done") }
-                    OutlinedButton(onClick = { vm.notNow(pick); skipped = skipped + pick.id }) { Text("Not now") }
+                    OutlinedButton(onClick = { askingWhen = true }) { Text("Not now") }
                 }
             }
         }
+        if (askingWhen) {
+            RemindAgainDialog(
+                onPick = { millis ->
+                    vm.notNow(pick, millis)
+                    if (millis == null) skipped = skipped + pick.id
+                    askingWhen = false
+                },
+                onDismiss = { askingWhen = false },
+            )
+        }
     }
     Spacer(Modifier.height(24.dp))
-    Text("Today", style = MaterialTheme.typography.titleSmall)
-    tasks.filter { it.bucket == Bucket.MUST && it.id != pick?.id }.take(5).forEach {
-        Text("• ${it.title}", Modifier.padding(vertical = 4.dp))
-    }
+    Text("Up next", style = MaterialTheme.typography.titleSmall)
+    tasks.filter { it.timing <= Timing.THIS_WEEK && it.id != pick?.id && !it.isSnoozed() }
+        .sortedBy { it.timing.ordinal }.take(5).forEach {
+            Text("• ${it.title}", Modifier.padding(vertical = 4.dp))
+        }
+}
+
+private const val MINUTE = 60_000L
+
+@Composable
+private fun RemindAgainDialog(onPick: (Long?) -> Unit, onDismiss: () -> Unit) {
+    val options = listOf(
+        "In 15 minutes" to 15 * MINUTE,
+        "In 1 hour" to 60 * MINUTE,
+        "Tomorrow" to 24 * 60 * MINUTE,
+        "Next week" to 7 * 24 * 60 * MINUTE,
+        "No reminder" to null,
+    )
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Remind me again") },
+        text = {
+            Column {
+                options.forEach { (label, millis) ->
+                    TextButton(onClick = { onPick(millis) }, modifier = Modifier.fillMaxWidth()) { Text(label) }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 @Composable
@@ -158,7 +198,7 @@ private fun TasksScreen(vm: TodoViewModel, tasks: List<Task>) {
         trailingIcon = { TextButton(onClick = { vm.add(line); line = "" }) { Text("Add") } },
     )
     Spacer(Modifier.height(12.dp))
-    val (someday, active) = tasks.partition { it.bucket == Bucket.SOMEDAY }
+    val (someday, active) = tasks.sortedBy { it.timing.ordinal }.partition { it.timing == Timing.SOMEDAY }
     LazyColumn {
         items(active, key = { it.id }) { TaskRow(it, onDone = { vm.complete(it) }, onEdit = { editing = it }) }
         item {
@@ -181,11 +221,7 @@ private fun TasksScreen(vm: TodoViewModel, tasks: List<Task>) {
 
 @Composable
 private fun TaskRow(task: Task, onDone: () -> Unit, onEdit: () -> Unit) {
-    val meta = listOfNotNull(
-        task.bucket.name.lowercase(),
-        task.minutes?.let { "$it min" },
-        task.where.takeIf { it != Where.ANYWHERE }?.label(),
-    ).joinToString(" · ")
+    val meta = task.meta()
     Row(
         Modifier.fillMaxWidth().clickable(onClick = onEdit).padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -196,6 +232,29 @@ private fun TaskRow(task: Task, onDone: () -> Unit, onEdit: () -> Unit) {
             Text(meta, style = MaterialTheme.typography.bodySmall)
         }
     }
+}
+
+private fun Task.meta(): String = listOfNotNull(
+    if (repeat != Repeat.NONE) repeat.label() else timing.label(),
+    Size.of(minutes)?.label,
+    where.takeIf { it != Where.ANYWHERE }?.label(),
+    "snoozed".takeIf { isSnoozed() },
+).joinToString(" · ")
+
+private fun Timing.label() = when (this) {
+    Timing.ASAP -> "ASAP"
+    Timing.THIS_WEEK -> "this week"
+    Timing.THIS_MONTH -> "this month"
+    Timing.THIS_QUARTER -> "this quarter"
+    Timing.ANYTIME -> "anytime idle"
+    Timing.SOMEDAY -> "someday"
+}
+
+private fun Repeat.label() = when (this) {
+    Repeat.NONE -> "once"
+    Repeat.DAILY -> "daily"
+    Repeat.WEEKLY -> "weekly"
+    Repeat.MONTHLY -> "monthly"
 }
 
 private fun Where.label() = when (this) {
@@ -209,45 +268,46 @@ private fun Where.label() = when (this) {
 @Composable
 private fun EditTaskDialog(task: Task, onSave: (Task) -> Unit, onDelete: () -> Unit, onDismiss: () -> Unit) {
     var title by remember { mutableStateOf(task.title) }
-    var minutes by remember { mutableStateOf(task.minutes?.toString() ?: "") }
-    var bucket by remember { mutableStateOf(task.bucket) }
+    var size by remember { mutableStateOf(Size.of(task.minutes)) }
+    var timing by remember { mutableStateOf(task.timing) }
+    var repeat by remember { mutableStateOf(task.repeat) }
     var where by remember { mutableStateOf(task.where) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Edit task") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(title, { title = it }, label = { Text("Task") }, singleLine = true)
-                OutlinedTextField(
-                    value = minutes,
-                    onValueChange = { minutes = it.filter(Char::isDigit).take(4) },
-                    label = { Text("Minutes") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                )
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Bucket.entries.forEach { b ->
-                        FilterChip(bucket == b, { bucket = b }, label = { Text(b.name.lowercase()) })
-                    }
-                }
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Where.entries.forEach { w ->
-                        FilterChip(where == w, { where = w }, label = { Text(w.label()) })
-                    }
-                }
+                ChipGroup("How long", Size.entries, size, { it.label }) { size = if (size == it) null else it }
+                ChipGroup("When", Timing.entries, timing, { it.label() }) { timing = it }
+                ChipGroup("Repeat", Repeat.entries, repeat, { it.label() }) { repeat = it }
+                ChipGroup("Where", Where.entries, where, { it.label() }) { where = it }
             }
         },
         confirmButton = {
             TextButton(
                 enabled = title.isNotBlank(),
                 onClick = {
-                    onSave(task.copy(title = title.trim(), minutes = minutes.toIntOrNull(), bucket = bucket, where = where))
+                    // Keep a typed exact time if it still falls in the chosen size.
+                    val minutes = if (Size.of(task.minutes) == size) task.minutes else size?.minutes
+                    onSave(task.copy(title = title.trim(), minutes = minutes, timing = timing, repeat = repeat, where = where))
                 },
             ) { Text("Save") }
         },
         dismissButton = { TextButton(onClick = onDelete) { Text("Delete") } },
     )
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun <T> ChipGroup(title: String, options: List<T>, selected: T?, label: (T) -> String, onClick: (T) -> Unit) {
+    Text(title, style = MaterialTheme.typography.labelLarge)
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        options.forEach { option ->
+            FilterChip(selected == option, { onClick(option) }, label = { Text(label(option)) })
+        }
+    }
 }
 
 @Composable

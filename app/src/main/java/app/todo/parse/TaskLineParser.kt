@@ -1,9 +1,10 @@
 package app.todo.parse
 
-import app.todo.data.Bucket
 import app.todo.data.Effort
 import app.todo.data.Goal
+import app.todo.data.Repeat
 import app.todo.data.Task
+import app.todo.data.Timing
 import app.todo.data.Where
 
 /**
@@ -12,7 +13,8 @@ import app.todo.data.Where
  * Cues can go anywhere in the line and are removed from the title:
  *  - time: 45m, 1h, 1h30m, 1.5h
  *  - place: @home, @out, @leaving (before leaving), @any
- *  - bucket: !must, !nice, !someday
+ *  - when: !asap, !week, !month, !quarter, !anytime, !someday (also "asap" on its own)
+ *  - repeat: !daily, !weekly, !monthly
  *  - effort: ~low, ~med, ~high
  * A bare trailing "home" or "out" also counts as a place, so "mow lawn 45m home" works.
  * Anything not recognised stays in the title and can be fixed with one tap.
@@ -25,13 +27,19 @@ object TaskLineParser {
         "@leaving" to Where.BEFORE_LEAVING, "@any" to Where.ANYWHERE,
     )
     private val bareTrailingPlaces = mapOf("home" to Where.HOME, "out" to Where.OUT)
-    private val buckets = mapOf("!must" to Bucket.MUST, "!nice" to Bucket.NICE, "!someday" to Bucket.SOMEDAY)
+    private val timings = mapOf(
+        "!asap" to Timing.ASAP, "asap" to Timing.ASAP, "!now" to Timing.ASAP, "!must" to Timing.ASAP,
+        "!week" to Timing.THIS_WEEK, "!month" to Timing.THIS_MONTH, "!quarter" to Timing.THIS_QUARTER,
+        "!anytime" to Timing.ANYTIME, "!nice" to Timing.ANYTIME, "!someday" to Timing.SOMEDAY,
+    )
+    private val repeats = mapOf("!daily" to Repeat.DAILY, "!weekly" to Repeat.WEEKLY, "!monthly" to Repeat.MONTHLY)
     private val efforts = mapOf("~low" to Effort.LOW, "~med" to Effort.MED, "~high" to Effort.HIGH)
 
     fun parse(line: String): Task {
         var minutes: Int? = null
         var where = Where.ANYWHERE
-        var bucket = Bucket.NICE
+        var timing = Timing.ANYTIME
+        var repeat = Repeat.NONE
         var effort = Effort.MED
         val kept = mutableListOf<String>()
 
@@ -39,7 +47,8 @@ object TaskLineParser {
             val lower = word.lowercase()
             when {
                 lower in places -> where = places.getValue(lower)
-                lower in buckets -> bucket = buckets.getValue(lower)
+                lower in timings -> timing = timings.getValue(lower)
+                lower in repeats -> repeat = repeats.getValue(lower)
                 lower in efforts -> effort = efforts.getValue(lower)
                 minutes == null && parseMinutes(lower) != null -> minutes = parseMinutes(lower)
                 else -> kept += word
@@ -56,7 +65,8 @@ object TaskLineParser {
 
         return Task(
             title = kept.joinToString(" ").ifEmpty { line.trim() },
-            bucket = bucket,
+            timing = timing,
+            repeat = repeat,
             minutes = minutes,
             effort = effort,
             where = where,

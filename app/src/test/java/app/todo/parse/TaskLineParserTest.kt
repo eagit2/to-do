@@ -1,7 +1,9 @@
 package app.todo.parse
 
-import app.todo.data.Bucket
 import app.todo.data.Effort
+import app.todo.data.Repeat
+import app.todo.data.Size
+import app.todo.data.Timing
 import app.todo.data.Where
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -13,7 +15,7 @@ class TaskLineParserTest {
         assertEquals("mow lawn", t.title)
         assertEquals(45, t.minutes)
         assertEquals(Where.HOME, t.where)
-        assertEquals(Bucket.NICE, t.bucket)
+        assertEquals(Timing.ANYTIME, t.timing)
     }
 
     @Test fun allCues() {
@@ -21,7 +23,7 @@ class TaskLineParserTest {
         assertEquals("call bank", t.title)
         assertEquals(90, t.minutes)
         assertEquals(Where.OUT, t.where)
-        assertEquals(Bucket.MUST, t.bucket)
+        assertEquals(Timing.ASAP, t.timing)
         assertEquals(Effort.LOW, t.effort)
     }
 
@@ -68,5 +70,21 @@ class TaskLineParserTest {
 
     @Test fun goalPerWeekSpelling() {
         assertEquals(2, TaskLineParser.parseGoal("read 2/wk").targetPerWeek)
+    }
+
+    @Test fun timingAndRepeat() {
+        val t = TaskLineParser.parse("water plants !weekly 5m")
+        assertEquals("water plants", t.title)
+        assertEquals(Repeat.WEEKLY, t.repeat)
+        assertEquals(Timing.THIS_QUARTER, TaskLineParser.parse("paint fence !quarter").timing)
+        assertEquals(Timing.ASAP, TaskLineParser.parse("pay bill asap").timing)
+    }
+
+    @Test fun sizeFromMinutes() {
+        assertEquals(Size.UNDER_10, Size.of(5))
+        assertEquals(Size.UNDER_30, Size.of(30))
+        assertEquals(Size.UNDER_60, Size.of(45))
+        assertEquals(Size.OVER_60, Size.of(120))
+        assertNull(Size.of(null))
     }
 }
