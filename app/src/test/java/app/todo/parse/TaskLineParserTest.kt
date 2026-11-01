@@ -49,4 +49,24 @@ class TaskLineParserTest {
         assertEquals("buy milk", t.title)
         assertNull(t.minutes)
     }
+
+    @Test fun goalWithCount() {
+        val g = TaskLineParser.parseGoal("workout 3x 45m")
+        assertEquals("workout", g.title)
+        assertEquals(3, g.targetPerWeek)
+        assertEquals(45, g.minutes)
+        assertEquals("EXERCISE", g.healthConnectType)
+    }
+
+    @Test fun goalDefaultsToOnceAWeek() {
+        val g = TaskLineParser.parseGoal("call mom @home")
+        assertEquals("call mom", g.title)
+        assertEquals(1, g.targetPerWeek)
+        assertEquals(Where.HOME, g.where)
+        assertNull(g.healthConnectType)
+    }
+
+    @Test fun goalPerWeekSpelling() {
+        assertEquals(2, TaskLineParser.parseGoal("read 2/wk").targetPerWeek)
+    }
 }

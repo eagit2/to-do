@@ -2,6 +2,7 @@ package app.todo.parse
 
 import app.todo.data.Bucket
 import app.todo.data.Effort
+import app.todo.data.Goal
 import app.todo.data.Task
 import app.todo.data.Where
 
@@ -61,6 +62,30 @@ object TaskLineParser {
             where = where,
         )
     }
+
+    private val perWeek = Regex("""^(\d+)(?:x|/wk|/week)$""", RegexOption.IGNORE_CASE)
+
+    /**
+     * Reads a weekly goal line such as "workout 3x 45m". The count ("3x", "3/wk") defaults to 1.
+     * Words like "workout", "run" or "gym" make Garmin workouts count automatically.
+     */
+    fun parseGoal(line: String): Goal {
+        var target = 1
+        val rest = line.trim().split(Regex("\\s+")).filter { word ->
+            perWeek.matchEntire(word)?.let { target = it.groupValues[1].toInt().coerceIn(1, 21); false } ?: true
+        }
+        val task = parse(rest.joinToString(" "))
+        val exercise = task.title.lowercase().split(" ").any { it in exerciseWords }
+        return Goal(
+            title = task.title,
+            targetPerWeek = target,
+            minutes = task.minutes,
+            where = task.where,
+            healthConnectType = if (exercise) "EXERCISE" else null,
+        )
+    }
+
+    private val exerciseWords = setOf("workout", "workouts", "run", "runs", "gym", "lift", "swim", "bike", "ride", "exercise")
 
     internal fun parseMinutes(word: String): Int? {
         val m = time.matchEntire(word) ?: return null
