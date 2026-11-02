@@ -1,106 +1,212 @@
 package app.todo.ui
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import android.net.Uri
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.room.withTransaction
+import app.todo.TodoApp
+import app.todo.data.AppSettings
+import app.todo.data.By
 import app.todo.data.Completion
 import app.todo.data.FreeWindow
-import app.todo.data.Goal
+import app.todo.data.Item
+import app.todo.data.Mode
 import app.todo.data.NudgeEvent
 import app.todo.data.NudgeOutcome
-import app.todo.data.Repeat
-import app.todo.data.Task
-import app.todo.data.Timing
+import app.todo.data.Per
+import app.todo.data.Place
 import app.todo.data.TodoDatabase
-import app.todo.parse.TaskLineParser
+import app.todo.device.Device
+import app.todo.logic.Ctx
+import app.todo.logic.Rules
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 import java.time.DayOfWeek
-import java.time.LocalDate
-import java.time.ZoneId
-import java.time.temporal.TemporalAdjusters
+import java.time.LocalDateTime
 
-class TodoViewModel(private val db: TodoDatabase) : ViewModel() {
-    val openTasks: StateFlow<List<Task>> =
-        db.tasks().openTasks().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+class TodoViewModel(application: Application) : AndroidViewModel(application) {
+    private val app = application as TodoApp
+    private val db: TodoDatabase = app.db
+    private val store = app.settings
 
-    /** Weeks start on Monday. Recomputed when the view model is created, which is each app launch. */
-    private val weekStart: Long = LocalDate.now()
-        .with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
-        .atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+    val settings: StateFlow<AppSettings> = store.settings
 
-    val goals = db.goals().progress(weekStart)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    val items: StateFlow<List<Item>> =
+        db.items().all().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    val places: StateFlow<List<Place>> =
+        db.places().all().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    val freeWindows: StateFlow<List<FreeWindow>> =
+        db.freeWindows().all().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    val freeWindows = db.freeWindows().all()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    /** Items set aside with "Not now · No reminder". They come back next launch. */
+    private val skippedState = MutableStateFlow<Set<String>>(emptySet())
+    val skipped: StateFlow<Set<String>> = skippedState.asStateFlow()
 
-    /** Placeholder ranking: most urgent "when" first, oldest first. Real ranking adds time, place and snooze history. */
-    fun suggestion(tasks: List<Task>, skipped: Set<String>, now: Long = System.currentTimeMillis()): Task? =
-        tasks.filter { it.timing != Timing.SOMEDAY && it.id !in skipped && !it.isSnoozed(now) }
-            .minByOrNull { it.timing.ordinal }
+    /** Read from Wi-Fi on each resume. Null means we can't tell yet. */
+    private val placeState = MutableStateFlow<String?>(null)
+    val currentPlace: StateFlow<String?> = placeState.asStateFlow()
 
-    fun add(line: String) {
-        if (line.isBlank()) return
-        viewModelScope.launch { db.tasks().insert(TaskLineParser.parse(line)) }
+    fun refreshPlace() {
+        placeState.value = Device.currentPlace(app, places.value)
     }
 
-    /** Finished from the Tasks tab, not from a suggestion, so no nudge event is logged. */
-    fun complete(task: Task) = viewModelScope.launch { db.tasks().update(finished(task)) }
+    fun ctx(now: LocalDateTime = LocalDateTime.now()): Ctx {
+        val s = settings.value
+        return Ctx(
+            now = now,
+            place = placeState.value,
+            weekStart = if (s.weekStartsSunday) DayOfWeek.SUNDAY else DayOfWeek.MONDAY,
+            dayStartHour = s.dayStartHour,
+        )
+    }
 
-    /** A repeating task hides until its next period instead of being marked done. */
-    private fun finished(task: Task): Task {
-        val now = System.currentTimeMillis()
-        val today = LocalDate.now()
-        val next = when (task.repeat) {
-            Repeat.NONE -> return task.copy(doneAt = now)
-            Repeat.DAILY -> today.plusDays(1)
-            Repeat.WEEKLY -> today.with(TemporalAdjusters.next(DayOfWeek.MONDAY))
-            Repeat.MONTHLY -> today.with(TemporalAdjusters.firstDayOfNextMonth())
+    fun updateSettings(change: (AppSettings) -> AppSettings) = store.update(change)
+
+    fun save(item: Item) = viewModelScope.launch { db.items().upsert(item) }
+
+    fun delete(item: Item) = viewModelScope.launch { db.items().delete(item) }
+
+    /** Marks done (never deletes) and returns the item as it was, for Undo. */
+    fun finish(item: Item, fromSuggestion: Boolean = false): Item {
+        val done = Rules.finished(item, ctx())
+        viewModelScope.launch {
+            db.items().upsert(done)
+            db.completions().insert(Completion(taskId = item.id))
+            if (fromSuggestion) db.nudges().insert(NudgeEvent(taskId = item.id, placeLabel = placeState.value, outcome = NudgeOutcome.DONE))
         }
-        return task.copy(snoozedUntil = next.atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli())
+        return item
     }
 
-    fun save(task: Task) = viewModelScope.launch { db.tasks().update(task) }
+    /** "Mark as not done?" on a crossed-off item. */
+    fun revert(item: Item) = save(Rules.reverted(item, ctx()))
 
-    fun delete(task: Task) = viewModelScope.launch { db.tasks().delete(task) }
-
-    fun addGoal(line: String) {
-        if (line.isBlank()) return
-        viewModelScope.launch { db.goals().insert(TaskLineParser.parseGoal(line)) }
-    }
-
-    fun goalDone(goal: Goal) = viewModelScope.launch {
-        db.goals().insertCompletion(Completion(goalId = goal.id))
-    }
-
-    fun deleteGoal(goal: Goal) = viewModelScope.launch {
-        db.goals().deleteCompletions(goal.id)
-        db.goals().delete(goal)
-    }
-
-    fun done(task: Task) = viewModelScope.launch {
-        db.tasks().update(finished(task))
-        db.nudges().insert(NudgeEvent(taskId = task.id, outcome = NudgeOutcome.DONE))
-    }
-
-    /** "Not now". [remindInMillis] null means no new reminder: the task just steps aside for now. */
-    fun notNow(task: Task, remindInMillis: Long?) = viewModelScope.launch {
-        if (remindInMillis != null) {
-            db.tasks().update(task.copy(snoozedUntil = System.currentTimeMillis() + remindInMillis))
-        }
+    /** "Not now". [remindInMillis] null means no reminder: the item just steps aside until next launch. */
+    fun notNow(item: Item, remindInMillis: Long?) = viewModelScope.launch {
+        if (remindInMillis == null) skippedState.value = skippedState.value + item.id
+        else db.items().upsert(item.copy(snoozedUntil = System.currentTimeMillis() + remindInMillis))
         db.nudges().insert(
             NudgeEvent(
-                taskId = task.id,
+                taskId = item.id, placeLabel = placeState.value,
                 outcome = if (remindInMillis == null) NudgeOutcome.DISMISSED else NudgeOutcome.SNOOZED,
             )
         )
     }
 
+    fun undoNotNow(item: Item) = viewModelScope.launch {
+        skippedState.value = skippedState.value - item.id
+        db.items().upsert(item)
+    }
+
     fun addFreeWindow(window: FreeWindow) = viewModelScope.launch { db.freeWindows().insert(window) }
 
     fun deleteFreeWindow(window: FreeWindow) = viewModelScope.launch { db.freeWindows().delete(window) }
-}
 
-fun Task.isSnoozed(now: Long = System.currentTimeMillis()) = snoozedUntil != null && snoozedUntil > now
+    /** "I'm here now": saves the Wi-Fi network the phone is on. Returns what was saved, for the message. */
+    fun setPlaceHere(place: Place): String? {
+        val wifi = Device.wifiName(app)
+        viewModelScope.launch {
+            db.places().upsert(place.copy(isSet = true, wifi = wifi ?: place.wifi))
+            placeState.value = Device.currentPlace(app, db.places().snapshot())
+        }
+        return wifi
+    }
+
+    fun addPlace(name: String) = viewModelScope.launch {
+        val label = name.trim().replaceFirstChar { it.uppercase() }
+        val id = name.trim().lowercase().replace(Regex("\\s+"), "-")
+        if (id.isEmpty() || id == "out" || places.value.any { it.id == id }) return@launch
+        db.places().upsert(Place(id = id, label = label, sortOrder = places.value.size))
+    }
+
+    fun deletePlace(place: Place) = viewModelScope.launch {
+        db.places().clear()
+        db.places().insertAll(places.value.filter { it.id != place.id })
+    }
+
+    fun deleteEverything() = viewModelScope.launch {
+        db.withTransaction {
+            db.items().clear(); db.freeWindows().clear(); db.completions().clear(); db.nudges().clear(); db.places().clear()
+            db.openHelper.writableDatabase.execSQL(TodoDatabase.SEED_PLACES)
+        }
+        store.replace(AppSettings())
+        skippedState.value = emptySet()
+        placeState.value = null
+    }
+
+    /** One JSON file with items, free times, place names and settings. Wi-Fi names are left out. */
+    suspend fun writeBackup(uri: Uri): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            val o = JSONObject()
+                .put("version", 3)
+                .put("items", JSONArray(db.items().snapshot().map { itemJson(it) }))
+                .put("freeWindows", JSONArray(db.freeWindows().snapshot().map {
+                    JSONObject().put("id", it.id).put("days", it.days).put("start", it.startMinute).put("end", it.endMinute)
+                }))
+                .put("places", JSONArray(db.places().snapshot().map {
+                    JSONObject().put("id", it.id).put("label", it.label).put("sortOrder", it.sortOrder)
+                }))
+                .put("settings", settings.value.toJson())
+            app.contentResolver.openOutputStream(uri, "wt")!!.use { it.write(o.toString(2).toByteArray()) }
+        }.isSuccess
+    }
+
+    /** Replaces what's on the phone with the file's contents. Places come back unset, so tap "I'm here now" again. */
+    suspend fun readBackup(uri: Uri): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            val text = app.contentResolver.openInputStream(uri)!!.use { it.readBytes().decodeToString() }
+            val o = JSONObject(text)
+            val items = o.getJSONArray("items").let { a -> (0 until a.length()).map { itemFrom(a.getJSONObject(it)) } }
+            val windows = o.getJSONArray("freeWindows").let { a ->
+                (0 until a.length()).map { a.getJSONObject(it) }.map {
+                    FreeWindow(id = it.getString("id"), days = it.getInt("days"), startMinute = it.getInt("start"), endMinute = it.getInt("end"))
+                }
+            }
+            val places = o.getJSONArray("places").let { a ->
+                (0 until a.length()).map { a.getJSONObject(it) }.map {
+                    Place(id = it.getString("id"), label = it.getString("label"), sortOrder = it.optInt("sortOrder"))
+                }
+            }
+            db.withTransaction {
+                db.items().clear(); db.freeWindows().clear(); db.places().clear()
+                db.items().insertAll(items); db.freeWindows().insertAll(windows); db.places().insertAll(places)
+            }
+            o.optJSONObject("settings")?.let { store.replace(AppSettings.fromJson(it)) }
+        }.isSuccess
+    }
+
+    private fun itemJson(t: Item) = JSONObject()
+        .put("id", t.id).put("title", t.title).put("minutes", t.minutes ?: JSONObject.NULL)
+        .put("mode", t.mode.name).put("byWhen", t.byWhen.name)
+        .put("dueDate", t.dueDate ?: JSONObject.NULL).put("dueTime", t.dueTime ?: JSONObject.NULL)
+        .put("target", t.target).put("period", t.period.name).put("doneCount", t.doneCount)
+        .put("periodKey", t.periodKey ?: JSONObject.NULL).put("doneDay", t.doneDay ?: JSONObject.NULL)
+        .put("doneAt", t.doneAt ?: JSONObject.NULL).put("leadMonths", t.leadMonths).put("garmin", t.garmin)
+        .put("times", t.times).put("places", t.places).put("createdAt", t.createdAt)
+
+    private fun itemFrom(o: JSONObject): Item {
+        fun str(k: String) = if (o.isNull(k)) null else o.optString(k)
+        return Item(
+            id = o.getString("id"), title = o.getString("title"),
+            minutes = if (o.isNull("minutes")) null else o.optInt("minutes"),
+            mode = runCatching { Mode.valueOf(o.getString("mode")) }.getOrDefault(Mode.ONCE),
+            byWhen = runCatching { By.valueOf(o.getString("byWhen")) }.getOrDefault(By.WHENEVER),
+            dueDate = str("dueDate"), dueTime = str("dueTime"),
+            target = o.optInt("target", 1),
+            period = runCatching { Per.valueOf(o.getString("period")) }.getOrDefault(Per.WEEK),
+            doneCount = o.optInt("doneCount"), periodKey = str("periodKey"), doneDay = str("doneDay"),
+            doneAt = if (o.isNull("doneAt")) null else o.optLong("doneAt"),
+            leadMonths = o.optInt("leadMonths", 2), garmin = o.optBoolean("garmin"),
+            times = o.optString("times"), places = o.optString("places"),
+            createdAt = o.optLong("createdAt", System.currentTimeMillis()),
+        )
+    }
+}

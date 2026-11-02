@@ -2,59 +2,58 @@ package app.todo.data
 
 import androidx.room.Dao
 import androidx.room.Delete
-import androidx.room.Embedded
 import androidx.room.Insert
+import androidx.room.OnConflictStrategy
 import androidx.room.Query
-import androidx.room.Update
+import androidx.room.Upsert
 import kotlinx.coroutines.flow.Flow
 
 @Dao
-interface TaskDao {
-    @Query("SELECT * FROM tasks WHERE doneAt IS NULL ORDER BY createdAt")
-    fun openTasks(): Flow<List<Task>>
+interface ItemDao {
+    @Query("SELECT * FROM items ORDER BY createdAt")
+    fun all(): Flow<List<Item>>
 
-    @Insert
-    suspend fun insert(task: Task)
+    @Query("SELECT * FROM items")
+    suspend fun snapshot(): List<Item>
 
-    @Update
-    suspend fun update(task: Task)
+    @Upsert
+    suspend fun upsert(item: Item)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(items: List<Item>)
 
     @Delete
-    suspend fun delete(task: Task)
+    suspend fun delete(item: Item)
+
+    @Query("DELETE FROM items")
+    suspend fun clear()
 }
 
-/** A goal with how many times it was done since the start of the week. */
-data class GoalProgress(
-    @Embedded val goal: Goal,
-    val doneThisWeek: Int,
-)
+@Dao
+interface PlaceDao {
+    @Query("SELECT * FROM places ORDER BY sortOrder, label")
+    fun all(): Flow<List<Place>>
+
+    @Query("SELECT * FROM places")
+    suspend fun snapshot(): List<Place>
+
+    @Upsert
+    suspend fun upsert(place: Place)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(places: List<Place>)
+
+    @Query("DELETE FROM places")
+    suspend fun clear()
+}
 
 @Dao
-interface GoalDao {
-    @Query("SELECT * FROM goals ORDER BY title")
-    fun goals(): Flow<List<Goal>>
-
-    @Query("SELECT COUNT(*) FROM completions WHERE goalId = :goalId AND at >= :since")
-    fun countSince(goalId: String, since: Long): Flow<Int>
-
-    @Query(
-        """SELECT goals.*, (SELECT COUNT(*) FROM completions c
-               WHERE c.goalId = goals.id AND c.at >= :weekStart) AS doneThisWeek
-           FROM goals ORDER BY title"""
-    )
-    fun progress(weekStart: Long): Flow<List<GoalProgress>>
-
-    @Delete
-    suspend fun delete(goal: Goal)
-
-    @Query("DELETE FROM completions WHERE goalId = :goalId")
-    suspend fun deleteCompletions(goalId: String)
-
+interface CompletionDao {
     @Insert
-    suspend fun insert(goal: Goal)
+    suspend fun insert(completion: Completion)
 
-    @Insert
-    suspend fun insertCompletion(completion: Completion)
+    @Query("DELETE FROM completions")
+    suspend fun clear()
 }
 
 @Dao
@@ -62,8 +61,11 @@ interface NudgeDao {
     @Insert
     suspend fun insert(event: NudgeEvent)
 
-    @Query("SELECT * FROM nudges WHERE taskId = :taskId ORDER BY at DESC")
-    suspend fun forTask(taskId: String): List<NudgeEvent>
+    @Query("SELECT * FROM nudges WHERE taskId = :itemId ORDER BY at DESC")
+    suspend fun forItem(itemId: String): List<NudgeEvent>
+
+    @Query("DELETE FROM nudges")
+    suspend fun clear()
 }
 
 @Dao
@@ -71,9 +73,18 @@ interface FreeWindowDao {
     @Query("SELECT * FROM free_windows ORDER BY startMinute")
     fun all(): Flow<List<FreeWindow>>
 
-    @Insert
+    @Query("SELECT * FROM free_windows")
+    suspend fun snapshot(): List<FreeWindow>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(window: FreeWindow)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(windows: List<FreeWindow>)
 
     @Delete
     suspend fun delete(window: FreeWindow)
+
+    @Query("DELETE FROM free_windows")
+    suspend fun clear()
 }

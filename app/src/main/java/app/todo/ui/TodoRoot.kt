@@ -1,357 +1,362 @@
 package app.todo.ui
 
-import androidx.compose.foundation.clickable
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.List
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Star
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.Checkbox
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.Card
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.lifecycle.viewmodel.initializer
-import androidx.lifecycle.viewmodel.viewModelFactory
-import app.todo.data.Goal
-import app.todo.data.Repeat
-import app.todo.data.Size
-import app.todo.data.Task
-import app.todo.data.Timing
-import app.todo.data.TodoDatabase
-import app.todo.data.Where
+import app.todo.data.Item
+import app.todo.data.Mode
+import app.todo.data.Per
+import app.todo.logic.Rules
+import app.todo.parse.TaskLineParser
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
-private enum class Tab(val label: String, val icon: ImageVector) {
-    NOW("Now", Icons.Filled.Home),
-    TASKS("Tasks", Icons.Filled.List),
-    GOALS("Goals", Icons.Filled.Star),
+private enum class Tab(val label: String) { NOW("Now"), LIST("List"), PROGRESS("Progress") }
+
+private data class Draft(val item: Item, val isNew: Boolean)
+
+@Composable
+fun TodoRoot(vm: TodoViewModel = viewModel()) {
+    val settings by vm.settings.collectAsStateWithLifecycle()
+    TodoTheme(settings.theme, settings.wallpaperColors) { Shell(vm) }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun TodoRoot(db: TodoDatabase) {
-    val vm: TodoViewModel = viewModel(factory = viewModelFactory { initializer { TodoViewModel(db) } })
-    val context = LocalContext.current
-    val colors = if (isSystemInDarkTheme()) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-    var tab by rememberSaveable { mutableStateOf(Tab.NOW) }
-    var showSettings by rememberSaveable { mutableStateOf(false) }
+private fun Shell(vm: TodoViewModel) {
+    val cs = MaterialTheme.colorScheme
+    val settings by vm.settings.collectAsStateWithLifecycle()
+    val items by vm.items.collectAsStateWithLifecycle()
+    val places by vm.places.collectAsStateWithLifecycle()
+    val windows by vm.freeWindows.collectAsStateWithLifecycle()
+    val skipped by vm.skipped.collectAsStateWithLifecycle()
+    val place by vm.currentPlace.collectAsStateWithLifecycle()
 
-    MaterialTheme(colorScheme = colors) {
-        Scaffold(
-            topBar = {
-                TopAppBar(
-                    title = { Text(if (showSettings) "Settings" else tab.label) },
-                    actions = {
-                        IconButton(onClick = { showSettings = !showSettings }) {
-                            Icon(Icons.Filled.Settings, contentDescription = "Settings")
-                        }
-                    },
-                )
-            },
-            bottomBar = {
-                NavigationBar {
+    // The clock ticks every 30 s so pacing, "today" and free times stay current while the app is open.
+    val now by produceState(LocalDateTime.now()) { while (true) { delay(30_000); value = LocalDateTime.now() } }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.refreshPlace() }
+    LaunchedEffect(places) { vm.refreshPlace() }
+    val ctx = remember(now, settings, place) { vm.ctx(now) }
+    val candidates = remember(items, ctx, skipped) { Rules.candidates(items, ctx, skipped) }
+
+    var tab by rememberSaveable { mutableStateOf(Tab.NOW) }
+    var page by rememberSaveable { mutableStateOf<SetPage?>(null) }
+    var pageFromApp by rememberSaveable { mutableStateOf(false) }
+    var draft by remember { mutableStateOf<Draft?>(null) }
+    var remindFor by remember { mutableStateOf<Item?>(null) }
+    var confirm by remember { mutableStateOf<Confirm?>(null) }
+    var addingWindow by remember { mutableStateOf(false) }
+    var nowOpen by remember { mutableStateOf<String?>(null) }
+    var showLater by rememberSaveable { mutableStateOf(false) }
+    var line by rememberSaveable { mutableStateOf("") }
+    var showCues by rememberSaveable { mutableStateOf(false) }
+
+    val snack = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+    fun say(text: String, undo: (() -> Unit)? = null) {
+        scope.launch {
+            snack.currentSnackbarData?.dismiss()
+            val r = snack.showSnackbar(text, actionLabel = if (undo != null) "Undo" else null, duration = SnackbarDuration.Short)
+            if (r == SnackbarResult.ActionPerformed) undo?.invoke()
+        }
+    }
+
+    /** Done never deletes. A second tap on a crossed-off item asks before undoing. */
+    fun tick(t: Item, fromSuggestion: Boolean = false) {
+        if (Rules.isChecked(t, ctx)) {
+            val text = when {
+                Rules.isYearly(t) -> "“${t.title}” goes back to due " + (Rules.dueDate(t)?.minusYears(1)?.let { Rules.shortDate(it) } ?: "") + "."
+                t.mode == Mode.REPEAT -> "“${t.title}” goes back to ${(Rules.doneNow(t, ctx) - 1).coerceAtLeast(0)} of ${t.target} ${Rules.periodText(t.period)}."
+                else -> "“${t.title}” goes back on your list."
+            }
+            confirm = Confirm("Mark as not done?", text, "Undo") { vm.revert(t) }
+            return
+        }
+        val before = vm.finish(t, fromSuggestion)
+        nowOpen = null
+        var msg = "Done: " + t.title
+        if (Rules.isYearly(t)) Rules.showFrom(Rules.finished(t, ctx))?.let { msg += " · back " + Rules.shortDate(it) + " next year" }
+        say(msg) { vm.save(before) }
+    }
+
+    fun edit(t: Item) { draft = Draft(t, isNew = false) }
+
+    fun addLine() {
+        if (line.isBlank()) return
+        draft = Draft(TaskLineParser.parse(line, ctx.today), isNew = true)
+        line = ""
+        showCues = false
+    }
+
+    fun keepDraft() {
+        val d = draft ?: return
+        draft = null
+        if (d.item.title.isBlank()) return
+        vm.save(d.item.copy(title = d.item.title.trim()))
+    }
+
+    BackHandler(enabled = page != null) {
+        page = if (page != SetPage.HOME && !pageFromApp) SetPage.HOME else null
+        pageFromApp = false
+    }
+
+    Scaffold(
+        containerColor = cs.background,
+        snackbarHost = { SnackbarHost(snack) },
+        topBar = {
+            val p = page
+            if (p == null) {
+                Row(Modifier.statusBarsPadding().padding(start = 20.dp, end = 8.dp, top = 18.dp, bottom = 6.dp), verticalAlignment = Alignment.Top) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(tab.label, fontSize = 34.sp, lineHeight = 42.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.6).sp)
+                        Text(subtitle(tab, items, ctx), fontSize = 14.sp, lineHeight = 20.sp, color = cs.onSurfaceVariant)
+                    }
+                    IconButton(onClick = { page = SetPage.HOME; pageFromApp = false }) { Icon(AppIcons.gear, "Settings") }
+                }
+            } else {
+                Row(Modifier.statusBarsPadding().heightIn(min = 64.dp).padding(start = 4.dp, end = 16.dp, top = 10.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = {
+                        page = if (p != SetPage.HOME && !pageFromApp) SetPage.HOME else null
+                        pageFromApp = false
+                    }) { Icon(AppIcons.back, "Back") }
+                    Text(p.title, fontSize = 24.sp, lineHeight = 32.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        },
+        bottomBar = {
+            if (page == null) Column(Modifier.imePadding()) {
+                if (tab == Tab.LIST) AddDock(line, { line = it }, showCues, { showCues = !showCues }, ::addLine, ctx.today)
+                NavigationBar(containerColor = cs.surfaceContainer) {
                     Tab.entries.forEach { t ->
                         NavigationBarItem(
-                            selected = !showSettings && tab == t,
-                            onClick = { tab = t; showSettings = false },
-                            icon = { Icon(t.icon, contentDescription = null) },
-                            label = { Text(t.label) },
+                            selected = tab == t,
+                            onClick = { tab = t; nowOpen = null },
+                            icon = { Icon(when (t) { Tab.NOW -> AppIcons.bolt; Tab.LIST -> AppIcons.list; Tab.PROGRESS -> AppIcons.chart }, null) },
+                            label = { Text(t.label, fontWeight = if (tab == t) FontWeight.Bold else FontWeight.Medium) },
+                            colors = NavigationBarItemDefaults.colors(indicatorColor = cs.secondaryContainer),
                         )
                     }
                 }
-            },
-        ) { padding ->
-            val tasks by vm.openTasks.collectAsStateWithLifecycle()
-            Column(Modifier.padding(padding).padding(16.dp).fillMaxSize()) {
-                when {
-                    showSettings -> SettingsScreen(vm)
-                    tab == Tab.NOW -> NowScreen(vm, tasks)
-                    tab == Tab.TASKS -> TasksScreen(vm, tasks)
-                    tab == Tab.GOALS -> GoalsScreen(vm)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun NowScreen(vm: TodoViewModel, tasks: List<Task>) {
-    // "No reminder" skips a task until the app restarts; timed reminders are stored on the task.
-    var skipped by remember { mutableStateOf(setOf<String>()) }
-    var askingWhen by remember { mutableStateOf(false) }
-    val pick = vm.suggestion(tasks, skipped)
-
-    if (pick == null) {
-        Text("Nothing to do right now.", style = MaterialTheme.typography.titleMedium)
-    } else {
-        Card(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(20.dp)) {
-                Text(pick.title, style = MaterialTheme.typography.headlineSmall)
-                Text(pick.meta(), style = MaterialTheme.typography.bodyMedium)
-                Spacer(Modifier.height(16.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Button(onClick = { vm.done(pick) }) { Text("Done") }
-                    OutlinedButton(onClick = { askingWhen = true }) { Text("Not now") }
-                }
-            }
-        }
-        if (askingWhen) {
-            RemindAgainDialog(
-                onPick = { millis ->
-                    vm.notNow(pick, millis)
-                    if (millis == null) skipped = skipped + pick.id
-                    askingWhen = false
-                },
-                onDismiss = { askingWhen = false },
-            )
-        }
-    }
-    Spacer(Modifier.height(24.dp))
-    Text("Up next", style = MaterialTheme.typography.titleSmall)
-    tasks.filter { it.timing <= Timing.THIS_WEEK && it.id != pick?.id && !it.isSnoozed() }
-        .sortedBy { it.timing.ordinal }.take(5).forEach {
-            Text("• ${it.title}", Modifier.padding(vertical = 4.dp))
-        }
-}
-
-private const val MINUTE = 60_000L
-
-@Composable
-private fun RemindAgainDialog(onPick: (Long?) -> Unit, onDismiss: () -> Unit) {
-    val options = listOf(
-        "In 15 minutes" to 15 * MINUTE,
-        "In 1 hour" to 60 * MINUTE,
-        "Tomorrow" to 24 * 60 * MINUTE,
-        "Next week" to 7 * 24 * 60 * MINUTE,
-        "No reminder" to null,
-    )
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Remind me again") },
-        text = {
-            Column {
-                options.forEach { (label, millis) ->
-                    TextButton(onClick = { onPick(millis) }, modifier = Modifier.fillMaxWidth()) { Text(label) }
-                }
             }
         },
-        confirmButton = {},
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-    )
-}
-
-@Composable
-private fun TasksScreen(vm: TodoViewModel, tasks: List<Task>) {
-    var line by rememberSaveable { mutableStateOf("") }
-    var showSomeday by rememberSaveable { mutableStateOf(false) }
-    var editing by remember { mutableStateOf<Task?>(null) }
-
-    OutlinedTextField(
-        value = line,
-        onValueChange = { line = it },
-        modifier = Modifier.fillMaxWidth(),
-        singleLine = true,
-        placeholder = { Text("mow lawn 45m home") },
-        trailingIcon = { TextButton(onClick = { vm.add(line); line = "" }) { Text("Add") } },
-    )
-    Spacer(Modifier.height(12.dp))
-    val (someday, active) = tasks.sortedBy { it.timing.ordinal }.partition { it.timing == Timing.SOMEDAY }
-    LazyColumn {
-        items(active, key = { it.id }) { TaskRow(it, onDone = { vm.complete(it) }, onEdit = { editing = it }) }
-        item {
-            TextButton(onClick = { showSomeday = !showSomeday }) {
-                Text(if (showSomeday) "Hide someday" else "Someday (${someday.size})")
+    ) { pad ->
+        Column(
+            Modifier.fillMaxSize().padding(pad).verticalScroll(rememberScrollState()).padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 24.dp),
+        ) {
+            val p = page
+            if (p != null) {
+                SettingsPage(
+                    p,
+                    SettingsEnv(
+                        vm, settings, items, places, windows, ctx, candidates,
+                        say = { say(it) }, confirm = { confirm = it }, addFreeTime = { addingWindow = true },
+                        go = { page = it; pageFromApp = false },
+                    ),
+                )
+            } else when (tab) {
+                Tab.NOW -> NowScreen(
+                    candidates, ctx, windows, places, settings, nowOpen,
+                    onToggleOpen = { id -> nowOpen = if (nowOpen == id) null else id },
+                    onDone = { tick(it, fromSuggestion = it.id == candidates.firstOrNull()?.id) },
+                    onNotNow = { remindFor = it },
+                    onEdit = ::edit,
+                    onSignals = { page = SetPage.SIGNALS; pageFromApp = true },
+                )
+                Tab.LIST -> ListScreen(items, ctx, showLater, { showLater = !showLater }, { tick(it) }, ::edit)
+                Tab.PROGRESS -> ProgressScreen(items, ctx, onPlusOne = { t ->
+                    val before = vm.finish(t)
+                    say("Done: " + t.title) { vm.save(before) }
+                }, onEdit = ::edit)
             }
         }
-        if (showSomeday) items(someday, key = { it.id }) { TaskRow(it, onDone = { vm.complete(it) }, onEdit = { editing = it }) }
     }
 
-    editing?.let { task ->
-        EditTaskDialog(
-            task = task,
-            onSave = { vm.save(it); editing = null },
-            onDelete = { vm.delete(task); editing = null },
-            onDismiss = { editing = null },
+    draft?.let { d ->
+        ItemSheet(
+            draft = d.item, isNew = d.isNew,
+            placeKeys = places.map { it.id } + "out",
+            onChange = { draft = d.copy(item = it) },
+            onKeep = ::keepDraft,
+            onCancelOrDelete = {
+                draft = null
+                if (!d.isNew) {
+                    val gone = items.firstOrNull { it.id == d.item.id }
+                    if (gone != null) {
+                        vm.delete(gone)
+                        say("Deleted: " + gone.title) { vm.save(gone) }
+                    }
+                }
+            },
         )
     }
+    remindFor?.let { t ->
+        RemindSheet(t.title, onPick = { label, ms ->
+            remindFor = null
+            vm.notNow(t, ms)
+            say(if (ms == null) "Skipped: ${t.title}" else "Snoozed: ${t.title} · ${label.lowercase()}") { vm.undoNotNow(t) }
+        }, onDismiss = { remindFor = null })
+    }
+    if (addingWindow) FreeTimeSheet(onAdd = { vm.addFreeWindow(it) }, onDismiss = { addingWindow = false })
+    confirm?.let { c -> ConfirmDialog(c) { confirm = null } }
 }
 
+private fun subtitle(tab: Tab, items: List<Item>, ctx: app.todo.logic.Ctx): String = when (tab) {
+    Tab.NOW -> ctx.now.format(DateTimeFormatter.ofPattern("EEEE", Locale.getDefault())) + ", " + Rules.clock(ctx.now.hour, ctx.now.minute)
+    Tab.LIST -> {
+        val active = items.filter { Rules.onList(it, ctx) && !Rules.isLater(it, ctx) }
+        val done = active.count { Rules.isChecked(it, ctx) }
+        "${active.size - done} to do" + if (done > 0) " · $done done today" else ""
+    }
+    Tab.PROGRESS -> {
+        val rep = items.filter { it.mode == Mode.REPEAT && it.period != Per.YEAR }
+        val behind = rep.count { val p = Rules.pace(it, ctx); p.left > 0 && p.behind >= 1 }
+        "${rep.size} repeating · " + if (behind > 0) "$behind behind pace" else "all on pace"
+    }
+}
+
+/** The add box above the tabs on List: typing shortcuts, a live preview of what the line will fill in, and Add. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun TaskRow(task: Task, onDone: () -> Unit, onEdit: () -> Unit) {
-    val meta = task.meta()
-    Row(
-        Modifier.fillMaxWidth().clickable(onClick = onEdit).padding(vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
+private fun AddDock(
+    line: String,
+    onLine: (String) -> Unit,
+    showCues: Boolean,
+    toggleCues: () -> Unit,
+    onAdd: () -> Unit,
+    today: java.time.LocalDate,
+) {
+    val cs = MaterialTheme.colorScheme
+    Column(
+        Modifier.fillMaxWidth().background(cs.background).padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Checkbox(checked = false, onCheckedChange = { onDone() })
-        Column {
-            Text(task.title)
-            Text(meta, style = MaterialTheme.typography.bodySmall)
-        }
-    }
-}
-
-private fun Task.meta(): String = listOfNotNull(
-    if (repeat != Repeat.NONE) repeat.label() else timing.label(),
-    Size.of(minutes)?.label,
-    where.takeIf { it != Where.ANYWHERE }?.label(),
-    "snoozed".takeIf { isSnoozed() },
-).joinToString(" · ")
-
-private fun Timing.label() = when (this) {
-    Timing.ASAP -> "ASAP"
-    Timing.THIS_WEEK -> "this week"
-    Timing.THIS_MONTH -> "this month"
-    Timing.THIS_QUARTER -> "this quarter"
-    Timing.ANYTIME -> "anytime idle"
-    Timing.SOMEDAY -> "someday"
-}
-
-private fun Repeat.label() = when (this) {
-    Repeat.NONE -> "once"
-    Repeat.DAILY -> "daily"
-    Repeat.WEEKLY -> "weekly"
-    Repeat.MONTHLY -> "monthly"
-}
-
-private fun Where.label() = when (this) {
-    Where.HOME -> "home"
-    Where.OUT -> "out"
-    Where.BEFORE_LEAVING -> "before leaving"
-    Where.ANYWHERE -> "anywhere"
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun EditTaskDialog(task: Task, onSave: (Task) -> Unit, onDelete: () -> Unit, onDismiss: () -> Unit) {
-    var title by remember { mutableStateOf(task.title) }
-    var size by remember { mutableStateOf(Size.of(task.minutes)) }
-    var timing by remember { mutableStateOf(task.timing) }
-    var repeat by remember { mutableStateOf(task.repeat) }
-    var where by remember { mutableStateOf(task.where) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Edit task") },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(title, { title = it }, label = { Text("Task") }, singleLine = true)
-                ChipGroup("How long", Size.entries, size, { it.label }) { size = if (size == it) null else it }
-                ChipGroup("When", Timing.entries, timing, { it.label() }) { timing = it }
-                ChipGroup("Repeat", Repeat.entries, repeat, { it.label() }) { repeat = it }
-                ChipGroup("Where", Where.entries, where, { it.label() }) { where = it }
-            }
-        },
-        confirmButton = {
-            TextButton(
-                enabled = title.isNotBlank(),
-                onClick = {
-                    // Keep a typed exact time if it still falls in the chosen size.
-                    val minutes = if (Size.of(task.minutes) == size) task.minutes else size?.minutes
-                    onSave(task.copy(title = title.trim(), minutes = minutes, timing = timing, repeat = repeat, where = where))
-                },
-            ) { Text("Save") }
-        },
-        dismissButton = { TextButton(onClick = onDelete) { Text("Delete") } },
-    )
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun <T> ChipGroup(title: String, options: List<T>, selected: T?, label: (T) -> String, onClick: (T) -> Unit) {
-    Text(title, style = MaterialTheme.typography.labelLarge)
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        options.forEach { option ->
-            FilterChip(selected == option, { onClick(option) }, label = { Text(label(option)) })
-        }
-    }
-}
-
-@Composable
-private fun GoalsScreen(vm: TodoViewModel) {
-    val goals by vm.goals.collectAsStateWithLifecycle()
-    var line by rememberSaveable { mutableStateOf("") }
-    var deleting by remember { mutableStateOf<Goal?>(null) }
-
-    OutlinedTextField(
-        value = line,
-        onValueChange = { line = it },
-        modifier = Modifier.fillMaxWidth(),
-        singleLine = true,
-        placeholder = { Text("workout 3x 45m") },
-        trailingIcon = { TextButton(onClick = { vm.addGoal(line); line = "" }) { Text("Add") } },
-    )
-    Spacer(Modifier.height(12.dp))
-    if (goals.isEmpty()) Text("No weekly goals yet. Type one above, like \"workout 3x\".")
-    LazyColumn {
-        items(goals, key = { it.goal.id }) { (goal, done) ->
-            Column(Modifier.fillMaxWidth().clickable { deleting = goal }.padding(vertical = 8.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text(goal.title)
-                        Text("$done of ${goal.targetPerWeek} this week", style = MaterialTheme.typography.bodySmall)
+        HorizontalDivider(color = cs.surfaceContainerHigh)
+        AnimatedVisibility(showCues) {
+            Surface(shape = RoundedCornerShape(20.dp), color = cs.surfaceContainerLow) {
+                Column(Modifier.padding(start = 16.dp, end = 6.dp, top = 6.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Typing shortcuts", Modifier.weight(1f), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        IconButton(onClick = toggleCues) { Icon(AppIcons.x, "Close shortcuts", Modifier.size(20.dp)) }
                     }
-                    OutlinedButton(onClick = { vm.goalDone(goal) }) { Text("+1") }
+                    TaskLineParser.help.forEach { (cue, means) ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Text(
+                                cue, Modifier.clip(RoundedCornerShape(6.dp)).background(cs.surfaceContainerHigh).padding(horizontal = 6.dp, vertical = 1.dp).weight(1f, fill = false),
+                                fontFamily = FontFamily.Monospace, fontSize = 12.sp,
+                            )
+                            Text(means, fontSize = 13.sp, color = cs.onSurfaceVariant)
+                        }
+                    }
+                    Hint("Anything else stays in the title. Every cue can be fixed on the next screen.")
                 }
-                Spacer(Modifier.height(6.dp))
-                LinearProgressIndicator(
-                    progress = { (done.toFloat() / goal.targetPerWeek).coerceAtMost(1f) },
+            }
+        }
+        if (line.isNotBlank()) {
+            val p = TaskLineParser.parse(line, today)
+            val chips = buildList {
+                p.minutes?.let { add(if (it < 60) "$it min" else "${it / 60} hr" + if (it % 60 != 0) " ${it % 60} min" else "") }
+                if (p.mode == Mode.REPEAT) add(if (p.period == Per.YEAR) "yearly" else "${p.target}× per ${p.period.label}")
+                else if (p.byWhen == app.todo.data.By.DATE) add(Rules.dueLabel(p))
+                else if (p.byWhen != app.todo.data.By.WHENEVER) add(p.byWhen.label)
+                app.todo.data.BestTime.entries.filter { it.name in p.times.split(',') }.forEach { add(it.label) }
+                p.places.split(',').filter { it.isNotEmpty() }.forEach { add("@$it") }
+                if (p.garmin) add("Garmin counts")
+            }
+            FlowRow(Modifier.padding(horizontal = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Hint("Adds", Modifier.align(Alignment.CenterVertically))
+                PChip(p.title, strong = true)
+                chips.forEach { PChip(it) }
+            }
+        }
+        Row(
+            Modifier.fillMaxWidth().height(56.dp).clip(RoundedCornerShape(28.dp)).background(cs.surfaceContainerHigh).padding(4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = toggleCues) { Icon(AppIcons.help, "Typing shortcuts", Modifier.size(20.dp), tint = cs.onSurfaceVariant) }
+            Box(Modifier.weight(1f).padding(horizontal = 4.dp), contentAlignment = Alignment.CenterStart) {
+                if (line.isEmpty()) Text("Add: read 20m !evening", fontSize = 16.sp, color = cs.onSurfaceVariant)
+                BasicTextField(
+                    value = line, onValueChange = onLine, singleLine = true,
+                    textStyle = TextStyle(fontSize = 16.sp, color = cs.onSurface),
+                    cursorBrush = SolidColor(cs.primary),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { onAdd() }),
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
+            IconButton(
+                onClick = onAdd,
+                modifier = Modifier.size(48.dp).clip(RoundedCornerShape(16.dp)).background(cs.primary),
+            ) { Icon(AppIcons.plus, "Add item", tint = cs.onPrimary) }
         }
     }
+}
 
-    deleting?.let { goal ->
-        AlertDialog(
-            onDismissRequest = { deleting = null },
-            title = { Text(goal.title) },
-            text = { Text("Delete this goal and its history?") },
-            confirmButton = { TextButton(onClick = { vm.deleteGoal(goal); deleting = null }) { Text("Delete") } },
-            dismissButton = { TextButton(onClick = { deleting = null }) { Text("Cancel") } },
-        )
-    }
+@Composable
+private fun PChip(text: String, strong: Boolean = false) {
+    val cs = MaterialTheme.colorScheme
+    Box(
+        Modifier.height(28.dp).clip(RoundedCornerShape(8.dp)).background(if (strong) cs.primaryContainer else cs.tertiaryContainer).padding(horizontal = 10.dp),
+        contentAlignment = Alignment.Center,
+    ) { Text(text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = if (strong) cs.onPrimaryContainer else cs.onTertiaryContainer) }
 }
