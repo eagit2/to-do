@@ -132,11 +132,11 @@ private fun Shell(vm: TodoViewModel) {
             confirm = Confirm("Mark as not done?", text, "Undo") { vm.revert(t) }
             return
         }
-        val before = vm.finish(t, fromSuggestion)
+        val undo = vm.finish(t, fromSuggestion)
         nowOpen = null
         var msg = "Done: " + t.title
         if (Rules.isYearly(t)) Rules.showFrom(Rules.finished(t, ctx))?.let { msg += " · back " + Rules.shortDate(it) + " next year" }
-        say(msg) { vm.save(before) }
+        say(msg) { vm.undo(undo) }
     }
 
     fun edit(t: Item) { draft = Draft(t, isNew = false) }
@@ -224,8 +224,8 @@ private fun Shell(vm: TodoViewModel) {
                 )
                 Tab.LIST -> ListScreen(items, ctx, showLater, { showLater = !showLater }, { tick(it) }, ::edit)
                 Tab.PROGRESS -> ProgressScreen(items, ctx, onPlusOne = { t ->
-                    val before = vm.finish(t)
-                    say("Done: " + t.title) { vm.save(before) }
+                    val undo = vm.finish(t)
+                    say("Done: " + t.title) { vm.undo(undo) }
                 }, onEdit = ::edit)
             }
         }
@@ -252,8 +252,8 @@ private fun Shell(vm: TodoViewModel) {
     remindFor?.let { t ->
         RemindSheet(t.title, onPick = { label, ms ->
             remindFor = null
-            vm.notNow(t, ms)
-            say(if (ms == null) "Skipped: ${t.title}" else "Snoozed: ${t.title} · ${label.lowercase()}") { vm.undoNotNow(t) }
+            val undo = vm.notNow(t, ms)
+            say(if (ms == null) "Skipped: ${t.title}" else "Snoozed: ${t.title} · ${label.lowercase()}") { vm.undo(undo) }
         }, onDismiss = { remindFor = null })
     }
     if (addingWindow) FreeTimeSheet(onAdd = { vm.addFreeWindow(it) }, onDismiss = { addingWindow = false })

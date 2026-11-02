@@ -250,13 +250,14 @@ fun ProgressScreen(items: List<Item>, ctx: Ctx, onPlusOne: (Item) -> Unit, onEdi
                             PaceBar(done.toFloat() / t.target, (p.expected / t.target).toFloat())
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 val (bg, fg) = when {
-                                    doneAll -> cs.primaryContainer to cs.onPrimaryContainer
+                                    doneAll && !p.sliding -> cs.primaryContainer to cs.onPrimaryContainer
                                     behind -> warm.bg to warm.fg
                                     else -> cs.secondaryContainer to cs.onSecondaryContainer
                                 }
                                 Box(Modifier.clip(RoundedCornerShape(15.dp)).background(bg).padding(horizontal = 12.dp, vertical = 6.dp)) {
                                     Text(
                                         when {
+                                            p.sliding -> "$done of ${p.possible} possible"
                                             doneAll -> if (per == Per.DAY) "Done for today" else "Done for this " + per.label
                                             behind -> "About ${p.behind.roundToInt()} behind"
                                             else -> "On pace"

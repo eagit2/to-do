@@ -1,7 +1,6 @@
 package app.todo.device
 
 import android.Manifest
-import android.app.AlarmManager
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
@@ -57,9 +56,6 @@ object Device {
             ?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: return false
         return status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
     }
-
-    fun exactAlarmsAllowed(context: Context) =
-        context.getSystemService(AlarmManager::class.java)?.canScheduleExactAlarms() == true
 
     fun batteryUnrestricted(context: Context) =
         context.getSystemService(PowerManager::class.java)?.isIgnoringBatteryOptimizations(context.packageName) == true

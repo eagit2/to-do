@@ -66,6 +66,7 @@ class TodoViewModel(application: Application) : AndroidViewModel(application) {
             place = placeState.value,
             weekStart = if (s.weekStartsSunday) DayOfWeek.SUNDAY else DayOfWeek.MONDAY,
             dayStartHour = s.dayStartHour,
+            pauses = s.pauses,
         )
     }
 
@@ -75,35 +76,61 @@ class TodoViewModel(application: Application) : AndroidViewModel(application) {
 
     fun delete(item: Item) = viewModelScope.launch { db.items().delete(item) }
 
-    /** Marks done (never deletes) and returns the item as it was, for Undo. */
-    fun finish(item: Item, fromSuggestion: Boolean = false): Item {
+    /** What Undo needs to put back: the item as it was, and the history rows to take out again. */
+    data class Undo(val before: Item, val completionId: String? = null, val nudgeId: String? = null)
+
+    /** Marks done (never deletes). Undo restores the item and removes the rows logged here, so stats don't overcount. */
+    fun finish(item: Item, fromSuggestion: Boolean = false): Undo {
         val done = Rules.finished(item, ctx())
+        val completion = Completion(taskId = item.id)
+        val nudge = if (fromSuggestion) NudgeEvent(taskId = item.id, at = completion.at, placeLabel = placeState.value, outcome = NudgeOutcome.DONE) else null
         viewModelScope.launch {
-            db.items().upsert(done)
-            db.completions().insert(Completion(taskId = item.id))
-            if (fromSuggestion) db.nudges().insert(NudgeEvent(taskId = item.id, placeLabel = placeState.value, outcome = NudgeOutcome.DONE))
+            db.withTransaction {
+                db.items().upsert(done)
+                db.completions().insert(completion)
+                nudge?.let { db.nudges().insert(it) }
+            }
         }
-        return item
+        return Undo(item, completion.id, nudge?.id)
     }
 
-    /** "Mark as not done?" on a crossed-off item. */
-    fun revert(item: Item) = save(Rules.reverted(item, ctx()))
+    fun undo(u: Undo) = viewModelScope.launch {
+        db.withTransaction {
+            db.items().upsert(u.before)
+            u.completionId?.let { db.completions().delete(it) }
+            u.nudgeId?.let { db.nudges().delete(it) }
+        }
+        if (u.nudgeId != null) skippedState.value = skippedState.value - u.before.id
+    }
+
+    /** "Mark as not done?" on a crossed-off item. Its latest Done row (and the matching suggestion row) goes too. */
+    fun revert(item: Item) {
+        val back = Rules.reverted(item, ctx())
+        viewModelScope.launch {
+            db.withTransaction {
+                db.items().upsert(back)
+                db.completions().latest(item.id)?.let { c ->
+                    db.completions().delete(c.id)
+                    db.nudges().deleteDoneAt(item.id, c.at)
+                }
+            }
+        }
+    }
 
     /** "Not now". [remindInMillis] null means no reminder: the item just steps aside until next launch. */
-    fun notNow(item: Item, remindInMillis: Long?) = viewModelScope.launch {
-        if (remindInMillis == null) skippedState.value = skippedState.value + item.id
-        else db.items().upsert(item.copy(snoozedUntil = System.currentTimeMillis() + remindInMillis))
-        db.nudges().insert(
-            NudgeEvent(
-                taskId = item.id, placeLabel = placeState.value,
-                outcome = if (remindInMillis == null) NudgeOutcome.DISMISSED else NudgeOutcome.SNOOZED,
-            )
+    fun notNow(item: Item, remindInMillis: Long?): Undo {
+        val nudge = NudgeEvent(
+            taskId = item.id, placeLabel = placeState.value,
+            outcome = if (remindInMillis == null) NudgeOutcome.DISMISSED else NudgeOutcome.SNOOZED,
         )
-    }
-
-    fun undoNotNow(item: Item) = viewModelScope.launch {
-        skippedState.value = skippedState.value - item.id
-        db.items().upsert(item)
+        if (remindInMillis == null) skippedState.value = skippedState.value + item.id
+        viewModelScope.launch {
+            db.withTransaction {
+                if (remindInMillis != null) db.items().upsert(item.copy(snoozedUntil = System.currentTimeMillis() + remindInMillis))
+                db.nudges().insert(nudge)
+            }
+        }
+        return Undo(item, nudgeId = nudge.id)
     }
 
     fun addFreeWindow(window: FreeWindow) = viewModelScope.launch { db.freeWindows().insert(window) }

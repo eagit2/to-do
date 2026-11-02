@@ -113,7 +113,6 @@ private fun rememberPerms(@Suppress("UNUSED_PARAMETER") tick: Int): List<Perm> {
         Perm("bgLocation", "Location all the time", "Only for the optional 150 m circles around places.", AppIcons.pin, Device.has(c, Manifest.permission.ACCESS_BACKGROUND_LOCATION)),
         Perm("calendar", "Calendar", "To skip times you're busy.", AppIcons.calendar, Device.has(c, Manifest.permission.READ_CALENDAR)),
         Perm("health", "Health Connect", "To count Garmin workouts and read steps. Comes in a later build.", AppIcons.watch, false, later = true),
-        Perm("alarms", "Alarms and reminders", "So snooze reminders and heads-ups arrive on time.", AppIcons.alarm, Device.exactAlarmsAllowed(c)),
         Perm("battery", "Unrestricted battery", "So Android doesn't put off idle checks.", AppIcons.battery, Device.batteryUnrestricted(c)),
     )
 }
@@ -166,11 +165,13 @@ private fun NudgesPage(env: SettingsEnv) {
                 }
                 ChipGroup(listOf(0 to "Off", 1 to "Until tomorrow", 3 to "3 days", 7 to "1 week"), { choice == it }) { d ->
                     up {
-                        it.copy(pauseUntil = when (d) {
+                        val now = System.currentTimeMillis()
+                        val until = when (d) {
                             0 -> null
                             1 -> LocalDate.now().plusDays(1).atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
-                            else -> System.currentTimeMillis() + d * day
-                        })
+                            else -> now + d * day
+                        }
+                        it.copy(pauseUntil = until, pauses = Rules.pausesWith(it.pauses, until, now))
                     }
                 }
                 Hint("For trips or sick days. Repeating items don't fall behind while paused.")
@@ -449,7 +450,6 @@ private fun PermsPage(perms: List<Perm>, refresh: () -> Unit) {
                             "bgLocation" -> if (perms.first { it.key == "location" }.granted) ask.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
                                 else askMany.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
                             "calendar" -> ask.launch(Manifest.permission.READ_CALENDAR)
-                            "alarms" -> open(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, Uri.parse("package:" + c.packageName)))
                             "battery" -> open(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + c.packageName)))
                         }
                     }) { Text("Allow") }

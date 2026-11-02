@@ -52,6 +52,13 @@ interface CompletionDao {
     @Insert
     suspend fun insert(completion: Completion)
 
+    @Query("DELETE FROM completions WHERE id = :id")
+    suspend fun delete(id: String)
+
+    /** The item's latest Done, removed by "Mark as not done?". */
+    @Query("SELECT * FROM completions WHERE taskId = :itemId ORDER BY at DESC LIMIT 1")
+    suspend fun latest(itemId: String): Completion?
+
     @Query("DELETE FROM completions")
     suspend fun clear()
 }
@@ -60,6 +67,13 @@ interface CompletionDao {
 interface NudgeDao {
     @Insert
     suspend fun insert(event: NudgeEvent)
+
+    @Query("DELETE FROM nudges WHERE id = :id")
+    suspend fun delete(id: String)
+
+    /** The Done row logged with a completion shares its time, so "Mark as not done?" can remove both. */
+    @Query("DELETE FROM nudges WHERE taskId = :itemId AND outcome = 'DONE' AND at = :at")
+    suspend fun deleteDoneAt(itemId: String, at: Long)
 
     @Query("SELECT * FROM nudges WHERE taskId = :itemId ORDER BY at DESC")
     suspend fun forItem(itemId: String): List<NudgeEvent>
