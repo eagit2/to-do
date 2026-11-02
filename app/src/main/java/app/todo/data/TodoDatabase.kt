@@ -9,7 +9,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [Item::class, Place::class, Completion::class, NudgeEvent::class, FreeWindow::class],
-    version = 3,
+    version = 4,
 )
 abstract class TodoDatabase : RoomDatabase() {
     abstract fun items(): ItemDao
@@ -26,11 +26,36 @@ abstract class TodoDatabase : RoomDatabase() {
 
         fun create(context: Context): TodoDatabase =
             Room.databaseBuilder(context, TodoDatabase::class.java, "todo.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 .addCallback(object : Callback() {
                     override fun onCreate(db: SupportSQLiteDatabase) = db.execSQL(SEED_PLACES)
                 })
                 .build()
+
+        /** The slot and weekend of a row's `at` time, in phone time, matching Rules.slotNow and Rules.isWeekend. */
+        private const val SLOT_OF_AT =
+            "CASE WHEN CAST(strftime('%H', `at` / 1000, 'unixepoch', 'localtime') AS INTEGER) < 12 THEN 'MORNING' " +
+                "WHEN CAST(strftime('%H', `at` / 1000, 'unixepoch', 'localtime') AS INTEGER) < 17 THEN 'AFTERNOON' ELSE 'EVENING' END"
+        private const val WEEKEND_OF_AT = "CASE strftime('%w', `at` / 1000, 'unixepoch', 'localtime') WHEN '0' THEN 1 WHEN '6' THEN 1 ELSE 0 END"
+
+        /**
+         * Quiet learning and clean-up: window end dates, "No reminder" kept across restarts, and the slot, day type
+         * and place of each Done and Not now. Old rows get their slot and day type from their time.
+         */
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `items` ADD COLUMN `windowEnd` TEXT")
+                db.execSQL("ALTER TABLE `items` ADD COLUMN `skippedUntil` INTEGER")
+                db.execSQL("ALTER TABLE `nudges` ADD COLUMN `slot` TEXT")
+                db.execSQL("ALTER TABLE `nudges` ADD COLUMN `weekend` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `completions` ADD COLUMN `placeLabel` TEXT")
+                db.execSQL("ALTER TABLE `completions` ADD COLUMN `slot` TEXT")
+                db.execSQL("ALTER TABLE `completions` ADD COLUMN `weekend` INTEGER NOT NULL DEFAULT 0")
+                for (table in listOf("nudges", "completions")) {
+                    db.execSQL("UPDATE `$table` SET `slot` = $SLOT_OF_AT, `weekend` = $WEEKEND_OF_AT")
+                }
+            }
+        }
 
         /**
          * Tasks and goals merge into one items table (design v2). Goals become items that repeat N per week;

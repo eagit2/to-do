@@ -19,12 +19,15 @@ import app.todo.data.Place
 import app.todo.data.TodoDatabase
 import app.todo.device.Device
 import app.todo.logic.Ctx
+import app.todo.logic.Learning
 import app.todo.logic.Rules
+import app.todo.logic.Tuning
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -47,9 +50,11 @@ class TodoViewModel(application: Application) : AndroidViewModel(application) {
     val freeWindows: StateFlow<List<FreeWindow>> =
         db.freeWindows().all().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    /** Items set aside with "Not now · No reminder". They come back next launch. */
-    private val skippedState = MutableStateFlow<Set<String>>(emptySet())
-    val skipped: StateFlow<Set<String>> = skippedState.asStateFlow()
+    /** The last ten weeks of Dones and Not nows, for quiet learning. */
+    val learning: StateFlow<Learning> = (System.currentTimeMillis() - Tuning.HISTORY_DAYS * 86_400_000).let { since ->
+        combine(db.completions().since(since), db.nudges().since(since)) { c, n -> Learning.from(c, n) }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), Learning.NONE)
+    }
 
     /** Read from Wi-Fi on each resume. Null means we can't tell yet. */
     private val placeState = MutableStateFlow<String?>(null)
@@ -66,44 +71,96 @@ class TodoViewModel(application: Application) : AndroidViewModel(application) {
             place = placeState.value,
             weekStart = if (s.weekStartsSunday) DayOfWeek.SUNDAY else DayOfWeek.MONDAY,
             dayStartHour = s.dayStartHour,
+            pauses = s.pauses,
         )
     }
 
     fun updateSettings(change: (AppSettings) -> AppSettings) = store.update(change)
 
-    fun save(item: Item) = viewModelScope.launch { db.items().upsert(item) }
+    init {
+        // Items set to this week, month or quarter before window end dates were saved get one from when they were added.
+        viewModelScope.launch {
+            val c = ctx()
+            db.items().snapshot().filter { it.windowEnd == null && Rules.windowEndFor(it.byWhen, c) != null && it.mode == Mode.ONCE }
+                .forEach { db.items().upsert(Rules.withWindow(it, c, from = c.dayOf(it.createdAt))) }
+        }
+    }
+
+    fun save(item: Item) = viewModelScope.launch { db.items().upsert(Rules.withWindow(item, ctx())) }
 
     fun delete(item: Item) = viewModelScope.launch { db.items().delete(item) }
 
-    /** Marks done (never deletes) and returns the item as it was, for Undo. */
-    fun finish(item: Item, fromSuggestion: Boolean = false): Item {
-        val done = Rules.finished(item, ctx())
-        viewModelScope.launch {
-            db.items().upsert(done)
-            db.completions().insert(Completion(taskId = item.id))
-            if (fromSuggestion) db.nudges().insert(NudgeEvent(taskId = item.id, placeLabel = placeState.value, outcome = NudgeOutcome.DONE))
-        }
-        return item
-    }
+    /** What Undo needs to put back: the item as it was, and the history rows to take out again. */
+    data class Undo(val before: Item, val completionId: String? = null, val nudgeId: String? = null)
 
-    /** "Mark as not done?" on a crossed-off item. */
-    fun revert(item: Item) = save(Rules.reverted(item, ctx()))
-
-    /** "Not now". [remindInMillis] null means no reminder: the item just steps aside until next launch. */
-    fun notNow(item: Item, remindInMillis: Long?) = viewModelScope.launch {
-        if (remindInMillis == null) skippedState.value = skippedState.value + item.id
-        else db.items().upsert(item.copy(snoozedUntil = System.currentTimeMillis() + remindInMillis))
-        db.nudges().insert(
-            NudgeEvent(
-                taskId = item.id, placeLabel = placeState.value,
-                outcome = if (remindInMillis == null) NudgeOutcome.DISMISSED else NudgeOutcome.SNOOZED,
-            )
+    /** Marks done (never deletes). Undo restores the item and removes the rows logged here, so stats don't overcount. */
+    fun finish(item: Item, fromSuggestion: Boolean = false): Undo {
+        val c = ctx()
+        val done = Rules.finished(item, c)
+        val completion = Completion(
+            taskId = item.id, at = c.nowMs, placeLabel = c.place, slot = Rules.slotNow(c).name, weekend = Rules.isWeekend(c),
         )
+        val nudge = if (fromSuggestion) event(item, NudgeOutcome.DONE, c) else null
+        viewModelScope.launch {
+            db.withTransaction {
+                db.items().upsert(done)
+                db.completions().insert(completion)
+                nudge?.let { db.nudges().insert(it) }
+            }
+        }
+        return Undo(item, completion.id, nudge?.id)
     }
 
-    fun undoNotNow(item: Item) = viewModelScope.launch {
-        skippedState.value = skippedState.value - item.id
-        db.items().upsert(item)
+    fun undo(u: Undo) = viewModelScope.launch {
+        db.withTransaction {
+            db.items().upsert(u.before)
+            u.completionId?.let { db.completions().delete(it) }
+            u.nudgeId?.let { db.nudges().delete(it) }
+        }
+    }
+
+    /** A nudge row stamped with when and where, sharing the context's time so a Done's two rows match. */
+    private fun event(item: Item, outcome: NudgeOutcome, c: Ctx) = NudgeEvent(
+        taskId = item.id, at = c.nowMs, placeLabel = c.place, outcome = outcome,
+        slot = Rules.slotNow(c).name, weekend = Rules.isWeekend(c),
+    )
+
+    /** Logs that [item] is today's Best fit, once per item per day, so "shown often, never acted on" can be counted. */
+    fun markShown(item: Item) = viewModelScope.launch {
+        val c = ctx()
+        val dayStart = c.today.atTime(c.dayStartHour, 0).atZone(c.zone).toInstant().toEpochMilli()
+        db.withTransaction {
+            if (db.nudges().shownSince(item.id, dayStart) == 0) db.nudges().insert(event(item, NudgeOutcome.SHOWN, c))
+        }
+    }
+
+    /** "Mark as not done?" on a crossed-off item. Its latest Done row (and the matching suggestion row) goes too. */
+    fun revert(item: Item) {
+        val back = Rules.reverted(item, ctx())
+        viewModelScope.launch {
+            db.withTransaction {
+                db.items().upsert(back)
+                db.completions().latest(item.id)?.let { c ->
+                    db.completions().delete(c.id)
+                    db.nudges().deleteDoneAt(item.id, c.at)
+                }
+            }
+        }
+    }
+
+    /** "Not now". [remindInMillis] null means no reminder: the item steps aside until the next day starts. */
+    fun notNow(item: Item, remindInMillis: Long?): Undo {
+        val c = ctx()
+        val nudge = event(item, if (remindInMillis == null) NudgeOutcome.DISMISSED else NudgeOutcome.SNOOZED, c)
+        val aside = if (remindInMillis == null) item.copy(skippedUntil = Rules.nextDayStartMs(c))
+            else item.copy(snoozedUntil = c.nowMs + remindInMillis)
+        viewModelScope.launch {
+            db.withTransaction {
+                db.items().upsert(aside)
+                db.nudges().insert(nudge)
+            }
+        }
+        return Undo(item, nudgeId = nudge.id)
     }
 
     fun addFreeWindow(window: FreeWindow) = viewModelScope.launch { db.freeWindows().insert(window) }
@@ -138,7 +195,6 @@ class TodoViewModel(application: Application) : AndroidViewModel(application) {
             db.openHelper.writableDatabase.execSQL(TodoDatabase.SEED_PLACES)
         }
         store.replace(AppSettings())
-        skippedState.value = emptySet()
         placeState.value = null
     }
 
@@ -191,6 +247,7 @@ class TodoViewModel(application: Application) : AndroidViewModel(application) {
         .put("periodKey", t.periodKey ?: JSONObject.NULL).put("doneDay", t.doneDay ?: JSONObject.NULL)
         .put("doneAt", t.doneAt ?: JSONObject.NULL).put("leadMonths", t.leadMonths).put("garmin", t.garmin)
         .put("times", t.times).put("places", t.places).put("createdAt", t.createdAt)
+        .put("windowEnd", t.windowEnd ?: JSONObject.NULL)
 
     private fun itemFrom(o: JSONObject): Item {
         fun str(k: String) = if (o.isNull(k)) null else o.optString(k)
@@ -207,6 +264,7 @@ class TodoViewModel(application: Application) : AndroidViewModel(application) {
             leadMonths = o.optInt("leadMonths", 2), garmin = o.optBoolean("garmin"),
             times = o.optString("times"), places = o.optString("places"),
             createdAt = o.optLong("createdAt", System.currentTimeMillis()),
+            windowEnd = if (o.has("windowEnd")) str("windowEnd") else null,
         )
     }
 }

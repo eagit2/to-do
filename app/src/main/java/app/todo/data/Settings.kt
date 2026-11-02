@@ -1,6 +1,7 @@
 package app.todo.data
 
 import android.content.Context
+import app.todo.logic.Pause
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import org.json.JSONArray
@@ -13,6 +14,8 @@ data class AppSettings(
     // Nudges and notifications
     val nudgesPerDay: Int = 1,
     val pauseUntil: Long? = null,
+    /** Every pause, so paused days stay out of pacing. The last one may still be running. */
+    val pauses: List<Pause> = emptyList(),
     val notifyIdle: Boolean = true,
     val notifySnooze: Boolean = true,
     val notifyDeadline: Boolean = true,
@@ -39,6 +42,7 @@ data class AppSettings(
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("nudgesPerDay", nudgesPerDay).put("pauseUntil", pauseUntil ?: JSONObject.NULL)
+        .put("pauses", JSONArray(pauses.map { JSONArray().put(it.from).put(it.until) }))
         .put("notifyIdle", notifyIdle).put("notifySnooze", notifySnooze)
         .put("notifyDeadline", notifyDeadline).put("notifyOut", notifyOut)
         .put("stillMinutes", stillMinutes).put("chargingMeansBusy", chargingMeansBusy)
@@ -54,9 +58,13 @@ data class AppSettings(
             val d = AppSettings()
             fun long(k: String): Long? = if (o.isNull(k)) null else o.optLong(k)
             val cals = o.optJSONArray("notBusyCalendars")
+            val ps = o.optJSONArray("pauses")
             return AppSettings(
                 nudgesPerDay = o.optInt("nudgesPerDay", d.nudgesPerDay),
                 pauseUntil = long("pauseUntil"),
+                pauses = if (ps == null) emptyList() else (0 until ps.length()).mapNotNull { i ->
+                    ps.optJSONArray(i)?.let { Pause(it.getLong(0), it.getLong(1)) }
+                },
                 notifyIdle = o.optBoolean("notifyIdle", d.notifyIdle),
                 notifySnooze = o.optBoolean("notifySnooze", d.notifySnooze),
                 notifyDeadline = o.optBoolean("notifyDeadline", d.notifyDeadline),

@@ -150,8 +150,9 @@ fun ItemSheet(
                             onChange(draft.copy(byWhen = By.DATE, dueDate = draft.dueDate ?: LocalDate.now().plusDays(1).toString()))
                             calendarOpen = true
                         }
-                        draft.byWhen == By.DATE -> onChange(draft.copy(byWhen = b, dueDate = null, dueTime = null))
-                        else -> onChange(draft.copy(byWhen = b))
+                        // A new pick starts its week, month or quarter from today.
+                        draft.byWhen == By.DATE -> onChange(draft.copy(byWhen = b, dueDate = null, dueTime = null, windowEnd = null))
+                        else -> onChange(draft.copy(byWhen = b, windowEnd = null))
                     }
                 }
             } else {

@@ -34,6 +34,8 @@ data class Ctx(
     /** Crossed-off items come back at this hour. A later hour suits late nights. */
     val dayStartHour: Int = 0,
     val zone: ZoneId = ZoneId.systemDefault(),
+    /** Times nudges were paused. Paused time doesn't count toward pace, so nothing falls behind on a trip. */
+    val pauses: List<Pause> = emptyList(),
 ) {
     val nowMs: Long get() = now.atZone(zone).toInstant().toEpochMilli()
 
@@ -44,7 +46,14 @@ data class Ctx(
         LocalDateTime.ofInstant(Instant.ofEpochMilli(ms), zone).minusHours(dayStartHour.toLong()).toLocalDate()
 }
 
-data class Pace(val expected: Double, val behind: Double, val left: Int)
+/** A stretch of time with nudges paused, in epoch ms. */
+data class Pause(val from: Long, val until: Long)
+
+/**
+ * [possible] is the most still reachable this period. When it's under the target the goal has slid to it
+ * ([sliding]): the item shows "2 of 2 possible" and never reads as behind.
+ */
+data class Pace(val expected: Double, val behind: Double, val left: Int, val possible: Int, val sliding: Boolean)
 
 data class Tag(val kind: TagKind, val text: String, val warm: Boolean = false)
 
@@ -62,18 +71,37 @@ object Rules {
 
     fun periodKey(per: Per, ctx: Ctx): String = per.name + ":" + periodStart(per, ctx).format(iso)
 
-    /** Share of the current period gone, counting the current hour as started. */
+    /** The first day of the next period. */
+    fun periodEnd(per: Per, ctx: Ctx): LocalDate = periodStart(per, ctx).let {
+        when (per) {
+            Per.DAY -> it.plusDays(1)
+            Per.WEEK -> it.plusWeeks(1)
+            Per.MONTH -> it.plusMonths(1)
+            Per.YEAR -> it.plusYears(1)
+        }
+    }
+
+    /** Share of the current period gone, counting the current hour as started. Paused time doesn't count as gone. */
     fun periodShare(per: Per, ctx: Ctx): Double {
         val start = periodStart(per, ctx).atTime(ctx.dayStartHour, 0)
-        val end = when (per) {
-            Per.DAY -> start.plusDays(1)
-            Per.WEEK -> start.plusWeeks(1)
-            Per.MONTH -> start.plusMonths(1)
-            Per.YEAR -> start.plusYears(1)
-        }
+        val end = periodEnd(per, ctx).atTime(ctx.dayStartHour, 0)
+        val goneEnd = ctx.now.truncatedTo(ChronoUnit.HOURS).plusHours(1)
         val total = Duration.between(start, end).toMinutes().toDouble()
-        val gone = Duration.between(start, ctx.now.truncatedTo(ChronoUnit.HOURS).plusHours(1)).toMinutes().toDouble()
+        val startMs = start.atZone(ctx.zone).toInstant().toEpochMilli()
+        val goneEndMs = goneEnd.atZone(ctx.zone).toInstant().toEpochMilli()
+        val paused = ctx.pauses.sumOf { p -> (minOf(p.until, goneEndMs) - maxOf(p.from, startMs)).coerceAtLeast(0) } / 60_000.0
+        val gone = Duration.between(start, goneEnd).toMinutes().toDouble() - paused
         return (gone / total).coerceIn(0.0, 1.0)
+    }
+
+    /**
+     * Starts, changes or ends a pause ([untilMs] null ends it). A pause still running is cut at [nowMs] first, so the
+     * history only holds time that was really paused. Pauses older than 400 days are dropped.
+     */
+    fun pausesWith(pauses: List<Pause>, untilMs: Long?, nowMs: Long): List<Pause> {
+        val keepFrom = nowMs - 400L * 86_400_000
+        val past = pauses.map { if (it.until > nowMs) it.copy(until = nowMs) else it }.filter { it.until > it.from && it.until > keepFrom }
+        return if (untilMs != null && untilMs > nowMs) past + Pause(nowMs, untilMs) else past
     }
 
     fun isYearly(t: Item) = t.mode == Mode.REPEAT && t.period == Per.YEAR
@@ -81,10 +109,24 @@ object Rules {
     /** Times done in the current period. A new week (or day, month) starts back at 0. */
     fun doneNow(t: Item, ctx: Ctx): Int = if (t.periodKey == periodKey(t.period, ctx)) t.doneCount else 0
 
-    fun pace(t: Item, ctx: Ctx): Pace {
-        val expected = t.target * periodShare(t.period, ctx)
+    /**
+     * The most a repeating item can still reach this period. Weekly and monthly items cross off for the day once
+     * ticked, so at most one more per day left (today counts until it's ticked). Daily items aren't capped.
+     */
+    fun possible(t: Item, ctx: Ctx): Int {
+        if (t.period == Per.DAY || t.period == Per.YEAR) return t.target
         val done = doneNow(t, ctx)
-        return Pace(expected, expected - done, (t.target - done).coerceAtLeast(0))
+        val days = ChronoUnit.DAYS.between(ctx.today, periodEnd(t.period, ctx)).toInt() - if (doneToday(t, ctx)) 1 else 0
+        return minOf(t.target, done + days.coerceAtLeast(0))
+    }
+
+    /** A goal slides to what's still reachable, so a slow week never piles up as "3 behind" on Sunday night. */
+    fun pace(t: Item, ctx: Ctx): Pace {
+        val done = doneNow(t, ctx)
+        val possible = possible(t, ctx)
+        val sliding = possible < t.target
+        val expected = minOf(t.target * periodShare(t.period, ctx), possible.toDouble())
+        return Pace(expected, if (sliding) 0.0 else expected - done, (possible - done).coerceAtLeast(0), possible, sliding)
     }
 
     fun dueDate(t: Item): LocalDate? = t.dueDate?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
@@ -115,6 +157,51 @@ object Rules {
     }
 
     fun snoozed(t: Item, ctx: Ctx) = t.snoozedUntil != null && t.snoozedUntil > ctx.nowMs
+
+    /** Set aside with "Not now · No reminder": off Now until the next day starts. */
+    fun setAside(t: Item, ctx: Ctx) = t.skippedUntil != null && t.skippedUntil > ctx.nowMs
+
+    /** When the app's next day starts, in epoch ms. */
+    fun nextDayStartMs(ctx: Ctx): Long =
+        ctx.today.plusDays(1).atTime(ctx.dayStartHour, 0).atZone(ctx.zone).toInstant().toEpochMilli()
+
+    /** The last day of a "this week / month / quarter" window that holds [from]. Null for every other choice. */
+    fun windowEndFor(b: By, ctx: Ctx, from: LocalDate = ctx.today): LocalDate? = when (b) {
+        By.THIS_WEEK -> from.with(TemporalAdjusters.previousOrSame(ctx.weekStart)).plusDays(6)
+        By.THIS_MONTH -> from.with(TemporalAdjusters.lastDayOfMonth())
+        By.THIS_QUARTER -> from.withDayOfMonth(1).withMonth((from.monthValue - 1) / 3 * 3 + 1).plusMonths(3).minusDays(1)
+        else -> null
+    }
+
+    /**
+     * Keeps [Item.windowEnd] in step with the "by when" choice: set when a window is picked (the sheet clears it on
+     * a new pick), kept on later edits, cleared for any other choice.
+     */
+    fun withWindow(t: Item, ctx: Ctx, from: LocalDate = ctx.today): Item {
+        val end = if (t.mode == Mode.ONCE) windowEndFor(t.byWhen, ctx, from) else null
+        return when {
+            end == null -> if (t.windowEnd == null) t else t.copy(windowEnd = null)
+            t.windowEnd != null -> t
+            else -> t.copy(windowEnd = end.format(iso))
+        }
+    }
+
+    fun windowEnd(t: Item): LocalDate? = t.windowEnd?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
+
+    /** Its week, month or quarter has ended while it was still open. */
+    fun windowPassed(t: Item, ctx: Ctx): Boolean = t.mode == Mode.ONCE && t.doneAt == null &&
+        windowEndFor(t.byWhen, ctx) != null && windowEnd(t)?.let { ctx.today > it } == true
+
+    /** "week of Nov 2", "October", "Q3": the window an item was set for. */
+    fun windowName(t: Item): String? {
+        val end = windowEnd(t) ?: return null
+        return when (t.byWhen) {
+            By.THIS_WEEK -> "week of " + shortDate(end.minusDays(6))
+            By.THIS_MONTH -> end.format(DateTimeFormatter.ofPattern("MMMM", Locale.getDefault()))
+            By.THIS_QUARTER -> "Q" + ((end.monthValue - 1) / 3 + 1)
+            else -> null
+        }
+    }
 
     fun slotNow(ctx: Ctx): BestTime = when {
         ctx.now.hour < 12 -> BestTime.MORNING
@@ -159,7 +246,7 @@ object Rules {
             val p = pace(t, ctx)
             return when {
                 p.left == 0 -> 99.0
-                p.behind >= 1 -> 0.5
+                p.sliding || p.behind >= 1 -> 0.5
                 p.behind > 0 -> 1.5
                 else -> 3.5
             }
@@ -170,14 +257,38 @@ object Rules {
     fun sorted(items: List<Item>, ctx: Ctx): List<Item> =
         items.sortedWith(compareBy<Item>({ urgency(it, ctx) }, { it.createdAt }))
 
-    /** What could be suggested right now, best first. */
-    fun candidates(items: List<Item>, ctx: Ctx, skipped: Set<String> = emptySet()): List<Item> =
-        sorted(items, ctx).filter { t ->
-            !(t.mode == Mode.ONCE && (t.byWhen == By.SOMEDAY || t.doneAt != null)) &&
-                !(t.mode == Mode.REPEAT && !isYearly(t) && doneNow(t, ctx) >= t.target) &&
-                !yearlyHidden(t, ctx) && !doneToday(t, ctx) &&
-                t.id !in skipped && !snoozed(t, ctx) && fitsTime(t, ctx) && fitsPlace(t, ctx)
+    /** Deadlines within a day and items behind pace can't be pushed down by learning. */
+    fun pinned(t: Item, ctx: Ctx): Boolean {
+        if (isYearly(t) || (t.mode == Mode.ONCE && t.byWhen == By.DATE)) return (daysLeft(t, ctx) ?: 99.0) < 1
+        if (t.mode == Mode.REPEAT) return pace(t, ctx).let { it.left > 0 && (it.sliding || it.behind >= 1) }
+        return false
+    }
+
+    /**
+     * [urgency] adjusted by what was learned here: put off here lately ranks below "whenever" items,
+     * usually done here rises a little. Lower = sooner.
+     */
+    fun rank(t: Item, ctx: Ctx, learn: Learning): Double {
+        val base = urgency(t, ctx)
+        val h = learn.here(t.id, ctx)
+        return when {
+            h.putOff && !pinned(t, ctx) -> maxOf(base, Tuning.BELOW_WHENEVER)
+            h.usualSpot || h.usualPlace -> base - Tuning.RISE
+            else -> base
         }
+    }
+
+    /** Ties change order each slot of each day, so Best fit doesn't show the same item all day. */
+    fun rotation(t: Item, ctx: Ctx): Int = (t.id + ctx.today + slotNow(ctx).name).hashCode()
+
+    /** What could be suggested right now, best first. */
+    fun candidates(items: List<Item>, ctx: Ctx, learn: Learning = Learning.NONE): List<Item> =
+        items.filter { t ->
+            !(t.mode == Mode.ONCE && (t.byWhen == By.SOMEDAY || t.doneAt != null)) &&
+                !(t.mode == Mode.REPEAT && !isYearly(t) && pace(t, ctx).left == 0) &&
+                !yearlyHidden(t, ctx) && !doneToday(t, ctx) &&
+                !setAside(t, ctx) && !snoozed(t, ctx) && fitsTime(t, ctx) && fitsPlace(t, ctx)
+        }.sortedWith(compareBy<Item>({ rank(it, ctx, learn) }, { rotation(it, ctx) }))
 
     /** Folded into "Someday and later": someday items and yearly items that aren't due to show yet. */
     fun isLater(t: Item, ctx: Ctx): Boolean =
@@ -235,7 +346,7 @@ object Rules {
             }
             t.mode == Mode.REPEAT -> {
                 val p = pace(t, ctx)
-                out += Tag(TagKind.REPEAT, "${doneNow(t, ctx)} of ${t.target} ${periodText(t.period)}")
+                out += Tag(TagKind.REPEAT, "${doneNow(t, ctx)} of " + (if (p.sliding) "${p.possible} possible" else "${t.target}") + " " + periodText(t.period))
                 if (p.left > 0 && p.behind >= 1 && !doneToday(t, ctx)) {
                     out += Tag(TagKind.BEHIND, "about ${p.behind.roundToInt()} behind", warm = true)
                 }
@@ -243,7 +354,7 @@ object Rules {
             t.doneAt == null -> when (t.byWhen) {
                 By.DATE -> out += Tag(TagKind.DATE, dueLabel(t), (daysLeft(t, ctx) ?: 99.0) < 3)
                 By.ASAP -> out += Tag(TagKind.ASAP, "ASAP", warm = true)
-                else -> out += Tag(TagKind.BY, t.byWhen.label)
+                else -> out += Tag(TagKind.BY, if (windowPassed(t, ctx)) "set for " + windowName(t) else t.byWhen.label)
             }
         }
         Size.of(t.minutes)?.let { out += Tag(TagKind.SIZE, it.label) }
@@ -258,19 +369,23 @@ object Rules {
         return out
     }
 
-    /** The one line under the top pick that says why it's first. */
-    fun why(t: Item, ctx: Ctx): String {
-        if (isYearly(t)) return "Yearly, due " + (dueDate(t)?.let { shortDate(it) } ?: "soon") + ". It moves up as the date gets close."
+    /** The one line under the top pick that says why it's first, plus what was learned when it helped. */
+    fun why(t: Item, ctx: Ctx, learn: Learning = Learning.NONE): String {
+        val usual = learn.usual(t.id, ctx)
+        val learned = usual?.let { " You usually do this $it." } ?: ""
+        if (isYearly(t)) return "Yearly, due " + (dueDate(t)?.let { shortDate(it) } ?: "soon") + ". It moves up as the date gets close." + learned
         if (t.mode == Mode.REPEAT) {
             val p = pace(t, ctx)
-            return if (p.behind >= 1) "About ${p.behind.roundToInt()} behind pace ${periodText(t.period)}, so it's first."
+            return if (p.sliding) "${p.left} more still fits ${periodText(t.period)}, so it's first.$learned"
+            else if (p.behind >= 1) "About ${p.behind.roundToInt()} behind pace ${periodText(t.period)}, so it's first.$learned"
+            else if (usual != null) "On pace, and you usually do this $usual."
             else "On pace, and it fits this time and place."
         }
         return when (t.byWhen) {
-            By.DATE -> "Deadline " + dueLabel(t).removePrefix("due ") + "."
-            By.ASAP -> "You marked it ASAP."
-            By.WHENEVER -> "It fits this time and place."
-            else -> "Due " + t.byWhen.label + "."
+            By.DATE -> "Deadline " + dueLabel(t).removePrefix("due ") + "." + learned
+            By.ASAP -> "You marked it ASAP.$learned"
+            By.WHENEVER -> if (usual != null) "You usually do this $usual." else "It fits this time and place."
+            else -> (if (windowPassed(t, ctx)) "It was set for " + (if (t.byWhen == By.THIS_WEEK) "the " else "") + windowName(t) + "." else "Due " + t.byWhen.label + ".") + learned
         }
     }
 
