@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A tick in a ring (the one thing to do now) with a warm nudge dot. Kept inside the 66 dp safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:strokeColor="#9DF2E9" android:strokeWidth="5" android:fillColor="#00000000"
+        android:pathData="M54,32a22,22 0 1,1 0,44a22,22 0 1,1 0,-44z" />
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="6.5" android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:fillColor="#00000000" android:pathData="M43.5,55l7.5,7.5l14.5,-15.5" />
+    <path android:fillColor="#FFDF9D" android:pathData="M72,30.5a6.5,6.5 0 1,1 0,13a6.5,6.5 0 1,1 0,-13z" />
+</vector>

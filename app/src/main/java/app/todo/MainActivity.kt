@@ -10,7 +10,6 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        val db = (application as TodoApp).db
-        setContent { TodoRoot(db) }
+        setContent { TodoRoot() }
     }
 }
