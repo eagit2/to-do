@@ -31,5 +31,7 @@ jobs:
             echo "::error::Room schema changed. Commit the files below."
             git status --porcelain app/schemas
             for f in $(git ls-files --others --modified app/schemas); do echo "=== $f"; cat "$f"; echo; done
+            echo "Same files as one line (base64 of a tar.gz, unpack with: base64 -d | tar xz):"
+            git ls-files --others --modified app/schemas | tar cz -T - | base64 -w0; echo
             exit 1
           fi
