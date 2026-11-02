@@ -32,7 +32,15 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.rememberDatePickerState
+import androidx.compose.material3.SheetState
+import androidx.compose.material3.SheetValue
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.foundation.ScrollState
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -63,6 +71,35 @@ import java.time.ZoneOffset
 
 private val sheetTitle = 24.sp
 
+/**
+ * Sheet state for every sheet: pulling it down closes it only past 25% of the screen height.
+ * A shorter pull, or a quick flick, snaps it back to the top and scrolls its content to the top.
+ * Tapping outside or Back still closes it (no drag happened).
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun rememberSnapBackSheetState(scroll: ScrollState? = null): SheetState {
+    val screenPx = with(LocalDensity.current) { LocalConfiguration.current.screenHeightDp.dp.toPx() }
+    val holder = remember { arrayOfNulls<SheetState>(1) }
+    val topOffset = remember { floatArrayOf(Float.MAX_VALUE) }
+    var snapBacks by remember { mutableIntStateOf(0) }
+    val state = rememberModalBottomSheetState(skipPartiallyExpanded = true) { target ->
+        if (target != SheetValue.Hidden) return@rememberModalBottomSheetState true
+        val offset = holder[0]?.let { runCatching { it.requireOffset() }.getOrNull() } ?: return@rememberModalBottomSheetState true
+        val pulled = offset - topOffset[0]
+        val close = pulled < 2f || pulled >= 0.25f * screenPx
+        if (!close) snapBacks++
+        close
+    }
+    holder[0] = state
+    // The smallest offset seen is where the sheet sits when fully open.
+    LaunchedEffect(state) {
+        snapshotFlow { runCatching { state.requireOffset() }.getOrNull() }.collect { o -> if (o != null && o < topOffset[0]) topOffset[0] = o }
+    }
+    LaunchedEffect(snapBacks) { if (snapBacks > 0) scroll?.animateScrollTo(0) }
+    return state
+}
+
 @Composable
 private fun FieldLabel(text: String, note: String? = null) {
     Row(Modifier.padding(top = 8.dp)) {
@@ -87,9 +124,10 @@ fun ItemSheet(
 ) {
     val cs = MaterialTheme.colorScheme
     var calendarOpen by remember { mutableStateOf(false) }
-    val state = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val scroll = rememberScrollState()
+    val state = rememberSnapBackSheetState(scroll)
     ModalBottomSheet(onDismissRequest = onKeep, sheetState = state, containerColor = cs.surfaceContainerLow) {
-        Column(Modifier.fillMaxWidth().weight(1f, fill = false).verticalScroll(rememberScrollState()).padding(horizontal = 20.dp),
+        Column(Modifier.fillMaxWidth().weight(1f, fill = false).verticalScroll(scroll).padding(horizontal = 20.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(if (isNew) "New item" else "Edit item", fontSize = sheetTitle, fontWeight = FontWeight.SemiBold)
             TextField(
@@ -253,7 +291,7 @@ fun RemindSheet(title: String, onPick: (label: String, millis: Long?) -> Unit, o
         Triple("Tomorrow", 24 * 60 * min, AppIcons.sun), Triple("Next week", 7 * 24 * 60 * min, AppIcons.calendar),
         Triple("No reminder", null, AppIcons.skip),
     )
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberSnapBackSheetState(),
         containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
         Column(Modifier.padding(start = 20.dp, end = 20.dp, bottom = 24.dp).navigationBarsPadding(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("Remind me again", fontSize = sheetTitle, fontWeight = FontWeight.SemiBold)
@@ -274,7 +312,7 @@ fun FreeTimeSheet(onAdd: (FreeWindow) -> Unit, onDismiss: () -> Unit) {
     val valid = days != 0 && start != end
     val keep = { if (valid) onAdd(FreeWindow(days = days, startMinute = start * 60, endMinute = end * 60)); onDismiss() }
     val hours = (0..23).map { it to Rules.clock(it) }
-    ModalBottomSheet(onDismissRequest = keep, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true), containerColor = cs.surfaceContainerLow) {
+    ModalBottomSheet(onDismissRequest = keep, sheetState = rememberSnapBackSheetState(), containerColor = cs.surfaceContainerLow) {
         Column(Modifier.padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("Add free time", fontSize = sheetTitle, fontWeight = FontWeight.SemiBold)
             ChipGroup(listOf(Rules.WEEKDAYS to "Weekdays", Rules.WEEKENDS to "Weekends", Rules.EVERYDAY to "Every day"), { days == it }) { days = it }
