@@ -1,5 +1,6 @@
 package app.todo.data
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -33,7 +34,8 @@ enum class Size(val minutes: Int, val label: String) {
 }
 
 enum class CompletionSource { MANUAL, HEALTH_CONNECT }
-enum class NudgeOutcome { DONE, SNOOZED, DISMISSED }
+/** SHOWN is logged once a day when an item is the Best fit, so "shown often, never acted on" can be counted. */
+enum class NudgeOutcome { DONE, SNOOZED, DISMISSED, SHOWN }
 
 /**
  * The one kind of thing on the list. A "goal" is just an item that repeats, e.g. 3 per week.
@@ -70,6 +72,10 @@ data class Item(
     val places: String = "",
     val snoozedUntil: Long? = null,
     val createdAt: Long = System.currentTimeMillis(),
+    /** yyyy-MM-dd. The last day of a "this week / month / quarter" window, saved when it's picked. */
+    val windowEnd: String? = null,
+    /** "Not now · No reminder" keeps it off Now until this time (the start of the next day). */
+    val skippedUntil: Long? = null,
 )
 
 val Item.timeSet: Set<BestTime>
@@ -102,7 +108,10 @@ data class FreeWindow(
     val endMinute: Int,
 )
 
-/** One row per Done. [goalId] is kept from v1 rows; new rows use [taskId] for the item id. */
+/**
+ * One row per Done. [goalId] is kept from v1 rows; new rows use [taskId] for the item id.
+ * [slot] (a [BestTime] slot name), [weekend] and [placeLabel] say when and where, for learning.
+ */
 @Entity(tableName = "completions", indices = [Index("goalId"), Index("taskId")])
 data class Completion(
     @PrimaryKey val id: String = UUID.randomUUID().toString(),
@@ -110,6 +119,9 @@ data class Completion(
     val taskId: String? = null,
     val at: Long = System.currentTimeMillis(),
     val source: CompletionSource = CompletionSource.MANUAL,
+    val placeLabel: String? = null,
+    val slot: String? = null,
+    @ColumnInfo(defaultValue = "0") val weekend: Boolean = false,
 )
 
 /** What happened when an item was suggested. Feeds ranking now and the optional export later. */
@@ -122,4 +134,7 @@ data class NudgeEvent(
     /** A label such as "home", never coordinates. */
     val placeLabel: String? = null,
     val outcome: NudgeOutcome,
+    /** Morning, afternoon or evening, as a [BestTime] name. */
+    val slot: String? = null,
+    @ColumnInfo(defaultValue = "0") val weekend: Boolean = false,
 )

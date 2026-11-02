@@ -158,6 +158,51 @@ object Rules {
 
     fun snoozed(t: Item, ctx: Ctx) = t.snoozedUntil != null && t.snoozedUntil > ctx.nowMs
 
+    /** Set aside with "Not now · No reminder": off Now until the next day starts. */
+    fun setAside(t: Item, ctx: Ctx) = t.skippedUntil != null && t.skippedUntil > ctx.nowMs
+
+    /** When the app's next day starts, in epoch ms. */
+    fun nextDayStartMs(ctx: Ctx): Long =
+        ctx.today.plusDays(1).atTime(ctx.dayStartHour, 0).atZone(ctx.zone).toInstant().toEpochMilli()
+
+    /** The last day of a "this week / month / quarter" window that holds [from]. Null for every other choice. */
+    fun windowEndFor(b: By, ctx: Ctx, from: LocalDate = ctx.today): LocalDate? = when (b) {
+        By.THIS_WEEK -> from.with(TemporalAdjusters.previousOrSame(ctx.weekStart)).plusDays(6)
+        By.THIS_MONTH -> from.with(TemporalAdjusters.lastDayOfMonth())
+        By.THIS_QUARTER -> from.withDayOfMonth(1).withMonth((from.monthValue - 1) / 3 * 3 + 1).plusMonths(3).minusDays(1)
+        else -> null
+    }
+
+    /**
+     * Keeps [Item.windowEnd] in step with the "by when" choice: set when a window is picked (the sheet clears it on
+     * a new pick), kept on later edits, cleared for any other choice.
+     */
+    fun withWindow(t: Item, ctx: Ctx, from: LocalDate = ctx.today): Item {
+        val end = if (t.mode == Mode.ONCE) windowEndFor(t.byWhen, ctx, from) else null
+        return when {
+            end == null -> if (t.windowEnd == null) t else t.copy(windowEnd = null)
+            t.windowEnd != null -> t
+            else -> t.copy(windowEnd = end.format(iso))
+        }
+    }
+
+    fun windowEnd(t: Item): LocalDate? = t.windowEnd?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
+
+    /** Its week, month or quarter has ended while it was still open. */
+    fun windowPassed(t: Item, ctx: Ctx): Boolean = t.mode == Mode.ONCE && t.doneAt == null &&
+        windowEndFor(t.byWhen, ctx) != null && windowEnd(t)?.let { ctx.today > it } == true
+
+    /** "week of Nov 2", "October", "Q3": the window an item was set for. */
+    fun windowName(t: Item): String? {
+        val end = windowEnd(t) ?: return null
+        return when (t.byWhen) {
+            By.THIS_WEEK -> "week of " + shortDate(end.minusDays(6))
+            By.THIS_MONTH -> end.format(DateTimeFormatter.ofPattern("MMMM", Locale.getDefault()))
+            By.THIS_QUARTER -> "Q" + ((end.monthValue - 1) / 3 + 1)
+            else -> null
+        }
+    }
+
     fun slotNow(ctx: Ctx): BestTime = when {
         ctx.now.hour < 12 -> BestTime.MORNING
         ctx.now.hour < 17 -> BestTime.AFTERNOON
@@ -212,14 +257,38 @@ object Rules {
     fun sorted(items: List<Item>, ctx: Ctx): List<Item> =
         items.sortedWith(compareBy<Item>({ urgency(it, ctx) }, { it.createdAt }))
 
+    /** Deadlines within a day and items behind pace can't be pushed down by learning. */
+    fun pinned(t: Item, ctx: Ctx): Boolean {
+        if (isYearly(t) || (t.mode == Mode.ONCE && t.byWhen == By.DATE)) return (daysLeft(t, ctx) ?: 99.0) < 1
+        if (t.mode == Mode.REPEAT) return pace(t, ctx).let { it.left > 0 && (it.sliding || it.behind >= 1) }
+        return false
+    }
+
+    /**
+     * [urgency] adjusted by what was learned here: put off here lately ranks below "whenever" items,
+     * usually done here rises a little. Lower = sooner.
+     */
+    fun rank(t: Item, ctx: Ctx, learn: Learning): Double {
+        val base = urgency(t, ctx)
+        val h = learn.here(t.id, ctx)
+        return when {
+            h.putOff && !pinned(t, ctx) -> maxOf(base, Tuning.BELOW_WHENEVER)
+            h.usualSpot || h.usualPlace -> base - Tuning.RISE
+            else -> base
+        }
+    }
+
+    /** Ties change order each slot of each day, so Best fit doesn't show the same item all day. */
+    fun rotation(t: Item, ctx: Ctx): Int = (t.id + ctx.today + slotNow(ctx).name).hashCode()
+
     /** What could be suggested right now, best first. */
-    fun candidates(items: List<Item>, ctx: Ctx, skipped: Set<String> = emptySet()): List<Item> =
-        sorted(items, ctx).filter { t ->
+    fun candidates(items: List<Item>, ctx: Ctx, learn: Learning = Learning.NONE): List<Item> =
+        items.filter { t ->
             !(t.mode == Mode.ONCE && (t.byWhen == By.SOMEDAY || t.doneAt != null)) &&
                 !(t.mode == Mode.REPEAT && !isYearly(t) && pace(t, ctx).left == 0) &&
                 !yearlyHidden(t, ctx) && !doneToday(t, ctx) &&
-                t.id !in skipped && !snoozed(t, ctx) && fitsTime(t, ctx) && fitsPlace(t, ctx)
-        }
+                !setAside(t, ctx) && !snoozed(t, ctx) && fitsTime(t, ctx) && fitsPlace(t, ctx)
+        }.sortedWith(compareBy<Item>({ rank(it, ctx, learn) }, { rotation(it, ctx) }))
 
     /** Folded into "Someday and later": someday items and yearly items that aren't due to show yet. */
     fun isLater(t: Item, ctx: Ctx): Boolean =
@@ -285,7 +354,7 @@ object Rules {
             t.doneAt == null -> when (t.byWhen) {
                 By.DATE -> out += Tag(TagKind.DATE, dueLabel(t), (daysLeft(t, ctx) ?: 99.0) < 3)
                 By.ASAP -> out += Tag(TagKind.ASAP, "ASAP", warm = true)
-                else -> out += Tag(TagKind.BY, t.byWhen.label)
+                else -> out += Tag(TagKind.BY, if (windowPassed(t, ctx)) "set for " + windowName(t) else t.byWhen.label)
             }
         }
         Size.of(t.minutes)?.let { out += Tag(TagKind.SIZE, it.label) }
@@ -300,20 +369,23 @@ object Rules {
         return out
     }
 
-    /** The one line under the top pick that says why it's first. */
-    fun why(t: Item, ctx: Ctx): String {
-        if (isYearly(t)) return "Yearly, due " + (dueDate(t)?.let { shortDate(it) } ?: "soon") + ". It moves up as the date gets close."
+    /** The one line under the top pick that says why it's first, plus what was learned when it helped. */
+    fun why(t: Item, ctx: Ctx, learn: Learning = Learning.NONE): String {
+        val usual = learn.usual(t.id, ctx)
+        val learned = usual?.let { " You usually do this $it." } ?: ""
+        if (isYearly(t)) return "Yearly, due " + (dueDate(t)?.let { shortDate(it) } ?: "soon") + ". It moves up as the date gets close." + learned
         if (t.mode == Mode.REPEAT) {
             val p = pace(t, ctx)
-            return if (p.sliding) "${p.left} more still fits ${periodText(t.period)}, so it's first."
-            else if (p.behind >= 1) "About ${p.behind.roundToInt()} behind pace ${periodText(t.period)}, so it's first."
+            return if (p.sliding) "${p.left} more still fits ${periodText(t.period)}, so it's first.$learned"
+            else if (p.behind >= 1) "About ${p.behind.roundToInt()} behind pace ${periodText(t.period)}, so it's first.$learned"
+            else if (usual != null) "On pace, and you usually do this $usual."
             else "On pace, and it fits this time and place."
         }
         return when (t.byWhen) {
-            By.DATE -> "Deadline " + dueLabel(t).removePrefix("due ") + "."
-            By.ASAP -> "You marked it ASAP."
-            By.WHENEVER -> "It fits this time and place."
-            else -> "Due " + t.byWhen.label + "."
+            By.DATE -> "Deadline " + dueLabel(t).removePrefix("due ") + "." + learned
+            By.ASAP -> "You marked it ASAP.$learned"
+            By.WHENEVER -> if (usual != null) "You usually do this $usual." else "It fits this time and place."
+            else -> (if (windowPassed(t, ctx)) "It was set for " + (if (t.byWhen == By.THIS_WEEK) "the " else "") + windowName(t) + "." else "Due " + t.byWhen.label + ".") + learned
         }
     }
 

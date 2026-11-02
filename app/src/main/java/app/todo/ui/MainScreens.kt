@@ -27,6 +27,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -48,6 +49,7 @@ import app.todo.data.Place
 import app.todo.data.timeSet
 import app.todo.data.BestTime
 import app.todo.logic.Ctx
+import app.todo.logic.Learning
 import app.todo.logic.Rules
 import kotlin.math.roundToInt
 
@@ -63,6 +65,7 @@ fun placeName(key: String?, places: List<Place>): String = when (key) {
 fun NowScreen(
     candidates: List<Item>,
     ctx: Ctx,
+    learning: Learning,
     windows: List<FreeWindow>,
     places: List<Place>,
     settings: AppSettings,
@@ -72,6 +75,7 @@ fun NowScreen(
     onNotNow: (Item) -> Unit,
     onEdit: (Item) -> Unit,
     onSignals: () -> Unit,
+    onShown: (Item) -> Unit,
 ) {
     val cs = MaterialTheme.colorScheme
     val win = Rules.windowNow(windows, ctx)
@@ -95,7 +99,8 @@ fun NowScreen(
                 }
             }
         } else {
-            Hero(pick, ctx, onDone = { onDone(pick) }, onNotNow = { onNotNow(pick) }, onEdit = { onEdit(pick) })
+            LaunchedEffect(pick.id, ctx.today) { onShown(pick) }
+            Hero(pick, ctx, learning, onDone = { onDone(pick) }, onNotNow = { onNotNow(pick) }, onEdit = { onEdit(pick) })
         }
         val also = candidates.drop(1).take(5)
         if (also.isNotEmpty()) {
@@ -133,7 +138,7 @@ private fun CtxChip(icon: androidx.compose.ui.graphics.vector.ImageVector, text:
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun Hero(t: Item, ctx: Ctx, onDone: () -> Unit, onNotNow: () -> Unit, onEdit: () -> Unit) {
+private fun Hero(t: Item, ctx: Ctx, learning: Learning, onDone: () -> Unit, onNotNow: () -> Unit, onEdit: () -> Unit) {
     val cs = MaterialTheme.colorScheme
     val warm = LocalWarm.current
     Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(32.dp), color = cs.primaryContainer, contentColor = cs.onPrimaryContainer) {
@@ -158,7 +163,7 @@ private fun Hero(t: Item, ctx: Ctx, onDone: () -> Unit, onNotNow: () -> Unit, on
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Icon(AppIcons.info, null, Modifier.size(18.dp).padding(top = 1.dp))
-                Text(Rules.why(t, ctx), fontSize = 14.sp, lineHeight = 20.sp)
+                Text(Rules.why(t, ctx, learning), fontSize = 14.sp, lineHeight = 20.sp)
             }
             Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onDone, modifier = Modifier.weight(1f).height(56.dp)) {

@@ -55,6 +55,9 @@ interface CompletionDao {
     @Query("DELETE FROM completions WHERE id = :id")
     suspend fun delete(id: String)
 
+    @Query("SELECT * FROM completions WHERE at >= :since")
+    fun since(since: Long): Flow<List<Completion>>
+
     /** The item's latest Done, removed by "Mark as not done?". */
     @Query("SELECT * FROM completions WHERE taskId = :itemId ORDER BY at DESC LIMIT 1")
     suspend fun latest(itemId: String): Completion?
@@ -70,6 +73,12 @@ interface NudgeDao {
 
     @Query("DELETE FROM nudges WHERE id = :id")
     suspend fun delete(id: String)
+
+    @Query("SELECT * FROM nudges WHERE at >= :since")
+    fun since(since: Long): Flow<List<NudgeEvent>>
+
+    @Query("SELECT COUNT(*) FROM nudges WHERE taskId = :itemId AND outcome = 'SHOWN' AND at >= :since")
+    suspend fun shownSince(itemId: String, since: Long): Int
 
     /** The Done row logged with a completion shares its time, so "Mark as not done?" can remove both. */
     @Query("DELETE FROM nudges WHERE taskId = :itemId AND outcome = 'DONE' AND at = :at")

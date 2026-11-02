@@ -89,7 +89,7 @@ private fun Shell(vm: TodoViewModel) {
     val items by vm.items.collectAsStateWithLifecycle()
     val places by vm.places.collectAsStateWithLifecycle()
     val windows by vm.freeWindows.collectAsStateWithLifecycle()
-    val skipped by vm.skipped.collectAsStateWithLifecycle()
+    val learning by vm.learning.collectAsStateWithLifecycle()
     val place by vm.currentPlace.collectAsStateWithLifecycle()
 
     // The clock ticks every 30 s so pacing, "today" and free times stay current while the app is open.
@@ -97,7 +97,7 @@ private fun Shell(vm: TodoViewModel) {
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.refreshPlace() }
     LaunchedEffect(places) { vm.refreshPlace() }
     val ctx = remember(now, settings, place) { vm.ctx(now) }
-    val candidates = remember(items, ctx, skipped) { Rules.candidates(items, ctx, skipped) }
+    val candidates = remember(items, ctx, learning) { Rules.candidates(items, ctx, learning) }
 
     var tab by rememberSaveable { mutableStateOf(Tab.NOW) }
     var page by rememberSaveable { mutableStateOf<SetPage?>(null) }
@@ -215,12 +215,13 @@ private fun Shell(vm: TodoViewModel) {
                 )
             } else when (tab) {
                 Tab.NOW -> NowScreen(
-                    candidates, ctx, windows, places, settings, nowOpen,
+                    candidates, ctx, learning, windows, places, settings, nowOpen,
                     onToggleOpen = { id -> nowOpen = if (nowOpen == id) null else id },
                     onDone = { tick(it, fromSuggestion = it.id == candidates.firstOrNull()?.id) },
                     onNotNow = { remindFor = it },
                     onEdit = ::edit,
                     onSignals = { page = SetPage.SIGNALS; pageFromApp = true },
+                    onShown = { vm.markShown(it) },
                 )
                 Tab.LIST -> ListScreen(items, ctx, showLater, { showLater = !showLater }, { tick(it) }, ::edit)
                 Tab.PROGRESS -> ProgressScreen(items, ctx, onPlusOne = { t ->

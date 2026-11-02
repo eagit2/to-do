@@ -32,6 +32,13 @@ android {
     buildFeatures {
         compose = true
     }
+    testOptions {
+        // Robolectric runs the Room migration tests on the JVM and reads the schemas from the debug assets.
+        unitTests.isIncludeAndroidResources = true
+    }
+    sourceSets {
+        getByName("debug").assets.srcDir("$projectDir/schemas")
+    }
 }
 
 ksp {
@@ -55,4 +62,7 @@ dependencies {
     ksp(libs.room.compiler)
 
     testImplementation(libs.junit)
+    testImplementation(libs.room.testing)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
 }

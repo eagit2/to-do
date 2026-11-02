@@ -26,6 +26,7 @@ jobs:
       # Room writes its schema JSON on every build. A changed or new file means the database
       # changed without its schema (and migration test inputs) being committed.
       - name: Room schemas are committed
+        if: always()
         run: |
           if [ -n "$(git status --porcelain app/schemas)" ]; then
             echo "::error::Room schema changed. Commit the files below."
